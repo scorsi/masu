@@ -1,0 +1,61 @@
+// Ingestion API of masu, the metric store. ADR 0003.
+syntax = "proto3";
+
+package masu.v1;
+
+// POST /v1/push, Content-Type: application/x-protobuf, Content-Encoding: zstd.
+message PushRequest {
+  // Node name; must equal the identity the store authenticated (ADR 0007).
+  string node = 1;
+  // 16 random bytes, created with the agent's spool.
+  bytes stream_id = 2;
+  // seq of records[0]; records[i] has seq first_seq + i.
+  uint64 first_seq = 3;
+  // One scrape record per element: a UTF-8 JSON object, no trailing newline, in the envelope
+  // of docs/storage-format.md. Its "node", "stream" and "seq" fields must match this request.
+  repeated bytes records = 4;
+  AgentStatus status = 5;
+}
+
+message PushResponse {
+  // Highest seq of this stream committed to disk.
+  uint64 acked_seq = 1;
+}
+
+// Body of a 400 response (ADR 0003). Nothing of the batch was stored.
+message PushRejected {
+  // Index in PushRequest.records of the first invalid record; absent when the request itself
+  // is invalid (node, stream_id or first_seq), in which case no record can be blamed.
+  optional uint32 record_index = 1;
+  // Machine-readable reason, e.g. "ts-format", "reserved-field:recv_ts", "seq-mismatch",
+  // "node-mismatch". The fixtures published by the store list every reason they exercise.
+  string reason = 2;
+}
+
+message AgentStatus {
+  string version = 1;
+  uint64 spool_bytes = 2;
+  uint64 spool_limit_bytes = 3;
+  // True while the agent's scrapes are paused because its spool is full.
+  bool paused = 4;
+  // Unix nanoseconds of the oldest record not yet acked, 0 if none.
+  int64 oldest_unacked_ns = 5;
+}
+
+// GET /v1/status, returned in the protojson mapping (lowerCamelCase names, 64-bit integers as
+// strings), the same shape as nisshi's status. ADR 0008.
+message StatusResponse {
+  message Stream {
+    string node = 1;
+    bytes stream_id = 2;
+    uint64 acked_seq = 3;
+    // Unix nanoseconds of the last commit for this stream.
+    int64 last_receive_ns = 4;
+    // Unix nanoseconds of the newest record "ts" received for this stream.
+    int64 last_record_ns = 5;
+  }
+  repeated Stream streams = 1;
+  map<string, AgentStatus> agents = 2;
+  uint64 disk_free_bytes = 3;
+  uint64 disk_reserve_bytes = 4;
+}
