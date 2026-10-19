@@ -67,7 +67,7 @@ fn records_fixtures() {
         let record = input(&line);
         let valid = line["valid"].as_bool().unwrap();
         let reason = line["reason"].as_str().unwrap();
-        let got = record::check(&record);
+        let got = record::check(&record).map(|_| ());
         let want = if valid {
             Ok(())
         } else {

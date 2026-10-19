@@ -14,12 +14,21 @@ pub const RECV_TS_MEMBER_BYTES: usize = 43;
 /// The largest record an agent may push.
 pub const MAX_PUSHED_BYTES: usize = MAX_STORED_BYTES - RECV_TS_MEMBER_BYTES;
 
+/// The envelope fields the ingestion path matches against the request (ADR 0003).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Envelope {
+    pub ts_ns: i64,
+    pub node: String,
+    pub stream: String,
+    pub seq: u64,
+}
+
 /// Checks one pushed record; `Err` holds the `PushRejected.reason`.
 ///
 /// One reason per record, the first rule broken in this order: size, UTF-8, framing, JSON,
 /// object, duplicate member, `recv_ts`, then the envelope fields in the order of
 /// storage-format.md, then `raw_b64`.
-pub fn check(record: &[u8]) -> Result<(), String> {
+pub fn check(record: &[u8]) -> Result<Envelope, String> {
     if record.len() > MAX_PUSHED_BYTES {
         return Err("record-too-large".into());
     }
@@ -48,11 +57,11 @@ pub fn check(record: &[u8]) -> Result<(), String> {
         return Err("reserved-field:recv_ts".into());
     }
     field(obj, "v", |v| v.as_u64().filter(|&n| n == 1))?;
-    field(obj, "ts", |v| v.as_str().filter(|s| is_timestamp(s)))?;
-    field(obj, "node", |v| v.as_str().filter(|s| is_node(s)))?;
+    let ts = field(obj, "ts", |v| v.as_str().filter(|s| is_timestamp(s)))?;
+    let node = field(obj, "node", |v| v.as_str().filter(|s| is_node(s)))?;
     field(obj, "service", Value::as_str)?;
-    field(obj, "stream", |v| v.as_str().filter(|s| is_stream(s)))?;
-    field(obj, "seq", Value::as_u64)?;
+    let stream = field(obj, "stream", |v| v.as_str().filter(|s| is_stream(s)))?;
+    let seq = field(obj, "seq", Value::as_u64)?;
     let up = field(obj, "up", Value::as_bool)?;
     field(obj, "dur_us", Value::as_u64)?;
     let error = if up {
@@ -68,7 +77,12 @@ pub fn check(record: &[u8]) -> Result<(), String> {
             return Err("unexpected-field:raw_b64".into());
         }
     }
-    Ok(())
+    Ok(Envelope {
+        ts_ns: crate::time::parse_ns(ts).ok_or("ts-format")?,
+        node: node.into(),
+        stream: stream.into(),
+        seq,
+    })
 }
 
 /// `missing-field:<name>` when absent, `<name>-format` when `get` refuses the value (wrong JSON
@@ -171,7 +185,7 @@ pub fn is_timestamp(s: &str) -> bool {
 }
 
 /// `[a-z0-9][a-z0-9-]{0,62}`: the node is a directory of the archive.
-fn is_node(s: &str) -> bool {
+pub fn is_node(s: &str) -> bool {
     (1..=63).contains(&s.len())
         && !s.starts_with('-')
         && s.bytes()
