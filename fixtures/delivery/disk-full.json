@@ -1,0 +1,12 @@
+{
+  "name": "disk-full",
+  "steps": [
+    {"push": {"first_seq": 1, "count": 10}, "expect": {"status": 200, "acked_seq": 10}},
+    {"disk": {"fill": true}},
+    {"push": {"first_seq": 11, "count": 10}, "expect": {"status": 507}},
+    {"check": {"stored_seqs": "1-10", "duplicates": 0, "gaps": 0}},
+    {"disk": {"free": true}},
+    {"push": {"first_seq": 11, "count": 10}, "expect": {"status": 200, "acked_seq": 20}},
+    {"check": {"stored_seqs": "1-20", "duplicates": 0, "gaps": 0}}
+  ]
+}

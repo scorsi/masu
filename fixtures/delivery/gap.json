@@ -1,0 +1,8 @@
+{
+  "name": "gap",
+  "steps": [
+    {"push": {"first_seq": 1, "count": 10}, "expect": {"status": 200, "acked_seq": 10}},
+    {"push": {"first_seq": 21, "count": 10}, "expect": {"status": 200, "acked_seq": 30}},
+    {"check": {"stored_seqs": "1-10,21-30", "duplicates": 0, "gaps": 1}}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "other-node",
+  "steps": [
+    {"push": {"node": "other", "first_seq": 1, "count": 10}, "expect": {"status": 400, "record_index": null}},
+    {"push": {"token": "other-node", "first_seq": 1, "count": 10}, "expect": {"status": 400, "record_index": null}},
+    {"check": {"stored_seqs": "", "duplicates": 0, "gaps": 0}},
+    {"push": {"first_seq": 1, "count": 10}, "expect": {"status": 200, "acked_seq": 10}},
+    {"check": {"stored_seqs": "1-10", "duplicates": 0, "gaps": 0}}
+  ]
+}

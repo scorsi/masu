@@ -1,0 +1,11 @@
+{
+  "name": "two-streams",
+  "steps": [
+    {"push": {"first_seq": 1, "count": 10}, "expect": {"status": 200, "acked_seq": 10}},
+    {"push": {"stream": "b", "first_seq": 1, "count": 5}, "expect": {"status": 200, "acked_seq": 5}},
+    {"push": {"first_seq": 11, "count": 5}, "expect": {"status": 200, "acked_seq": 15}},
+    {"push": {"stream": "b", "first_seq": 6, "count": 5}, "expect": {"status": 200, "acked_seq": 10}},
+    {"push": {"stream": "b", "first_seq": 1, "count": 10}, "expect": {"status": 200, "acked_seq": 10}},
+    {"check": {"duplicates": 0, "gaps": 0}}
+  ]
+}

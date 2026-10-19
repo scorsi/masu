@@ -20,7 +20,7 @@ One JSON file per scenario in `fixtures/delivery/`.
 | Step | Fields | Meaning |
 |---|---|---|
 | `push` | `first_seq`, `count`, optional `token` (`valid` default, `none`, `unknown`, `other-node`), `node` (`self` default, `other`), `invalid_at` (index of a record the pusher makes invalid), `stream` (`a` default, `b`: a second stream of the same node) | one `POST /v1/push` |
-| `expect` | `status`, `acked_seq`, `record_index`, `reason` | response checks; absent fields are not checked |
+| `expect` | `status`, `acked_seq`, `record_index`, `reason` | response checks; absent fields are not checked, `null` means the field must be absent from the response |
 | `check` | `stored_seqs` (ranges, `""` = none), `duplicates`, `gaps` (count of gap reports) | reads the store's files with standard tools, after a store-side flush |
 | `restart` | `kill: true` | `kill -9` the store and start it again |
 | `disk` | `fill: true` / `free: true` | fills or frees the store's test filesystem |

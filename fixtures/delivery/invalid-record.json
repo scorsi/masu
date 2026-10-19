@@ -1,0 +1,9 @@
+{
+  "name": "invalid-record",
+  "steps": [
+    {"push": {"first_seq": 1, "count": 10, "invalid_at": 3}, "expect": {"status": 400, "record_index": 3}},
+    {"check": {"stored_seqs": "", "duplicates": 0, "gaps": 0}},
+    {"push": {"first_seq": 1, "count": 10}, "expect": {"status": 200, "acked_seq": 10}},
+    {"check": {"stored_seqs": "1-10", "duplicates": 0, "gaps": 0}}
+  ]
+}
