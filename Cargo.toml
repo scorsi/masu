@@ -22,3 +22,16 @@ zstd = "0.14"
 [build-dependencies]
 prost-build = "0.13"
 
+
+[features]
+# The test pusher of ADR 0009 (docs/delivery-scenarios.md): not shipped in the package.
+pusher = []
+
+[[bin]]
+name = "masu"
+path = "src/main.rs"
+
+[[bin]]
+name = "masu-pusher"
+path = "src/pusher.rs"
+required-features = ["pusher"]

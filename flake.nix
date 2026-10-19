@@ -88,6 +88,11 @@
                 }
               ];
             };
+            vmTests = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+              vm-delivery = import ./nix/tests/delivery.nix self { inherit pkgs; };
+              vm-records = import ./nix/tests/records.nix self { inherit pkgs; };
+              vm-archive = import ./nix/tests/archive.nix self { inherit pkgs; };
+            };
           in
           {
             _module.args.pkgs = import inputs.nixpkgs {
@@ -151,7 +156,8 @@
               module-eval = pkgs.writeText "module-eval" (
                 builtins.unsafeDiscardStringContext moduleEval.config.system.build.toplevel.drvPath
               );
-            };
+            }
+            // vmTests;
 
             treefmt = {
               projectRootFile = "flake.nix";

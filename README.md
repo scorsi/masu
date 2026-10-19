@@ -7,7 +7,8 @@
 *枡 (masu): the wooden measuring box of Edo markets, the standard every quantity was measured
 against.*
 
-**Status:** M0 (exposition parser, `masu validate --metrics`, record fixtures); the archive is M1.
+**Status:** M1 (archive: `masu serve`, seal and retention, `masu read`, `masu verify`,
+`services.masu`); mTLS is M2.
 
 ## Role
 
@@ -55,3 +56,12 @@ agent's spool state (`paused`, oldest unacked record).
 
 Nix flake (crane), NixOS module, `nixosTest`. Docs in English. Public repository: no host
 names, domains or addresses of any deployment.
+
+## Testing hooks
+
+- `MASU_TEST_NOW=<ts>` (same format as `ts`) shifts `masu serve`'s clock to that instant at
+  start-up; it keeps running from there. Test only: the nixosTests use it to seal a day and to
+  run retention without waiting for midnight.
+- `masu-pusher` (`cargo build --features pusher`, `pkgs.masu.pusher`) runs a scenario of
+  `fixtures/delivery/` or every line of `fixtures/records/records.ndjson` against a running
+  store; not shipped in the package.

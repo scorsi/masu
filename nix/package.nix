@@ -1,4 +1,5 @@
 # The masu binary, built by crane. build.rs compiles proto/ with prost-build, which needs protoc.
+# `passthru.pusher` is the test pusher of ADR 0009 (feature `pusher`), for the nixosTests only.
 {
   lib,
   protobuf,
@@ -22,13 +23,26 @@ let
       ];
     };
   };
+  cargoArtifacts = craneLib.buildDepsOnly common;
 in
 craneLib.buildPackage (
   common
   // {
-    cargoArtifacts = craneLib.buildDepsOnly common;
+    inherit cargoArtifacts;
     doCheck = false; # the tests run in checks.cargo-test
     meta.mainProgram = "masu";
-    passthru = { inherit common; };
+    passthru = {
+      inherit common;
+      pusher = craneLib.buildPackage (
+        common
+        // {
+          inherit cargoArtifacts;
+          pname = "masu-pusher";
+          cargoExtraArgs = "--features pusher --bin masu-pusher";
+          doCheck = false;
+          meta.mainProgram = "masu-pusher";
+        }
+      );
+    };
   }
 )
