@@ -1,0 +1,18 @@
+# TYPE genkan_build info
+# HELP genkan_build Build of the running genkan.
+genkan_build_info{version="0.3.0"} 1
+# TYPE genkan_requests counter
+# HELP genkan_requests Requests answered.
+genkan_requests_total{listener="edge",route="forgejo",method="GET",code="2xx"} 4210
+genkan_requests_created{listener="edge",route="forgejo",method="GET",code="2xx"} 1792310040.0
+# TYPE genkan_request_duration_seconds histogram
+# UNIT genkan_request_duration_seconds seconds
+# HELP genkan_request_duration_seconds Time to answer a request.
+genkan_request_duration_seconds_bucket{listener="edge",le="0.05"} 4102 # {trace="a"} 0.031 1792310040.5
+genkan_request_duration_seconds_bucket{listener="edge",le="+Inf"} 4210
+genkan_request_duration_seconds_sum{listener="edge"} 61.5
+genkan_request_duration_seconds_count{listener="edge"} 4210
+# TYPE genkan_certificate_expiry_timestamp_seconds gauge
+# UNIT genkan_certificate_expiry_timestamp_seconds seconds
+genkan_certificate_expiry_timestamp_seconds{certificate="edge"} 1799020800
+# EOF

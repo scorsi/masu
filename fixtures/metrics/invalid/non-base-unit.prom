@@ -1,0 +1,2 @@
+# TYPE annai_query_duration_ms gauge
+annai_query_duration_ms 3

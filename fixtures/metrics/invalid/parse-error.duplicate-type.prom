@@ -1,0 +1,3 @@
+# TYPE svc_up gauge
+# TYPE svc_up gauge
+svc_up 1

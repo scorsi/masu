@@ -1,0 +1,6 @@
+# TYPE svc_wait_seconds histogram
+svc_wait_seconds_bucket{le="1"} 3
+svc_wait_seconds_bucket{le="0.1"} 3
+svc_wait_seconds_bucket{le="+Inf"} 5
+svc_wait_seconds_sum 1
+svc_wait_seconds_count 5

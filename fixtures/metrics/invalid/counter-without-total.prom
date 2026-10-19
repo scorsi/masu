@@ -1,0 +1,2 @@
+# TYPE annai_queries counter
+annai_queries{proto="udp"} 1

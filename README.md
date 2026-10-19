@@ -7,7 +7,7 @@
 *枡 (masu): the wooden measuring box of Edo markets, the standard every quantity was measured
 against.*
 
-**Status:** designed (ADRs 2026-10-19), no code yet.
+**Status:** M0 (exposition parser, `masu validate --metrics`, record fixtures); the archive is M1.
 
 ## Role
 

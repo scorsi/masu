@@ -1,0 +1,24 @@
+# HELP annai_build_info Build of the running annai.
+# TYPE annai_build_info gauge
+annai_build_info{version="0.4.0",mode="soto"} 1
+# HELP annai_queries_total Queries answered.
+# TYPE annai_queries_total counter
+annai_queries_total{proto="udp",qtype="A",rcode="NOERROR"} 18231
+annai_queries_total{proto="tcp",qtype="other",rcode="NXDOMAIN"} 12
+# HELP annai_query_duration_seconds Time to answer a query.
+# TYPE annai_query_duration_seconds histogram
+annai_query_duration_seconds_bucket{proto="udp",le="0.0001"} 9120
+annai_query_duration_seconds_bucket{proto="udp",le="0.001"} 18002
+annai_query_duration_seconds_bucket{proto="udp",le="0.01"} 18220
+annai_query_duration_seconds_bucket{proto="udp",le="+Inf"} 18231
+annai_query_duration_seconds_sum{proto="udp"} 4.112
+annai_query_duration_seconds_count{proto="udp"} 18231
+# HELP annai_cache_hit_ratio Share of lookups answered from the cache.
+# TYPE annai_cache_hit_ratio gauge
+annai_cache_hit_ratio 0.93
+# HELP annai_upstream_rtt_seconds Last upstream round trip.
+# TYPE annai_upstream_rtt_seconds gauge
+annai_upstream_rtt_seconds{upstream="resolver-a",note="quote \" and backslash \\ escaped"} NaN
+# HELP process_cpu_seconds_total Runtime metric, exempt from the naming rules.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 1.25

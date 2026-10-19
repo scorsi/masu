@@ -1,0 +1,13 @@
+[package]
+name = "masu"
+version = "0.1.0"
+edition = "2024"
+description = "Metric store: raw scrape archive and the metric convention"
+
+# Direct dependencies are limited to ADR 0002; M0 needs only these.
+[dependencies]
+prost = "0.13"
+serde_json = "1"
+
+[build-dependencies]
+prost-build = "0.13"
