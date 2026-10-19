@@ -38,6 +38,7 @@ pkgs.testers.runNixOSTest {
             ))
             if scenario == "disk-full.json":
                 print(machine.succeed("${common.lib.getExe pkgs.masu} verify /var/lib/masu"))
-                machine.succeed("for f in /var/lib/masu/archive/*/*.ndjson.zst; do zstd -t \"$f\"; done")
+                # One call: a loop would only report the last file's status.
+                machine.succeed("zstd -t /var/lib/masu/archive/*/*.ndjson.zst")
   '';
 }

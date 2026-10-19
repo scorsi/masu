@@ -55,6 +55,8 @@ rec {
         # Small, so that a filled test filesystem crosses it (disk-full scenario).
         diskReserve = 8 * 1024 * 1024;
       };
+      # Test node only: the scenarios restart the unit more than StartLimitBurst (5 in 10 s) allows.
+      systemd.services.masu.startLimitIntervalSec = 0;
       environment.systemPackages = [
         pkgs.zstd
         pkgs.jq

@@ -75,8 +75,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl restart masu.service")
         machine.wait_for_open_port(9472)
 
-    def zcat_jq(path, filter):
-        return machine.succeed(f"zstdcat {path} | jq -r '{filter}'").strip()
+    def zcat_jq(path, filter, opts=""):
+        return machine.succeed(f"zstdcat {path} | jq -r {opts} '{filter}'").strip()
 
     def curl_status(token):
         auth = f"-H 'Authorization: Bearer {token}'" if token else ""
@@ -91,8 +91,8 @@ pkgs.testers.runNixOSTest {
         print(machine.succeed(
             "${common.pusher} scenario ${self}/fixtures/delivery/in-order.json ${common.pusherArgs} --dump /root/pushed.ndjson"
         ))
-        assert zcat_jq("${day1}", "-s length") == "25"
-        assert zcat_jq("${day1}", ".recv_ts[:10]") .split() == ["2026-10-19"] * 25
+        assert zcat_jq("${day1}", "length", "-s") == "25"
+        assert zcat_jq("${day1}", ".recv_ts[:10]").split() == ["2026-10-19"] * 25
         machine.succeed(
             "zstdcat ${day1} | sed 's/,\"recv_ts\":\"[^\"]*\"}$/}/' | sort > /root/stored.ndjson"
             " && sort /root/pushed.ndjson | cmp - /root/stored.ndjson"
@@ -109,13 +109,13 @@ pkgs.testers.runNixOSTest {
         size = int(machine.succeed("stat -c %s ${day1}"))
         bytes_ = int(machine.succeed("jq -r .uncompressed_bytes ${manifest1}"))
         assert size < bytes_ / 10, f"sealed {size} bytes for {bytes_} raw"
-        assert zcat_jq("${day1}", "-s length") == "25"
+        assert zcat_jq("${day1}", "length", "-s") == "25"
         machine.succeed("zstd -t ${day1}")
         machine.succeed("curl -s http://127.0.0.1:9473/metrics | grep -x 'masu_seals_total{result=\"ok\"} 1'")
 
     with subtest("next open day, read over an interval, verify"):
         print(machine.succeed("${common.pusher} scenario ${continue} ${common.pusherArgs}"))
-        assert zcat_jq("${day2}", "-s length") == "5"
+        assert zcat_jq("${day2}", "length", "-s") == "5"
         assert zcat_jq("${day2}", ".recv_ts[:10]").split() == ["2026-10-20"] * 5
         out = machine.succeed(
             "${masu} read ${root} --node node-a --metric annai_queries_total"
