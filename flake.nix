@@ -35,7 +35,7 @@
             masu = final.callPackage ./nix/package.nix { craneLib = inputs.crane.mkLib final; };
           };
 
-          # M0: package only; the service (`services.masu` with config, unit, hardening) is M1.
+          # The full `services.masu` of milestone M1 (nix/module.nix).
           nixosModules.default =
             { pkgs, ... }:
             {
@@ -63,16 +63,28 @@
             craneLib = inputs.crane.mkLib pkgs;
             common = pkgs.masu.passthru.common;
             cargoArtifacts = craneLib.buildDepsOnly common;
-            # NixOS stubs: the module must evaluate on every system (kekkai's pattern).
-            moduleEval = lib.evalModules {
+            # The module in a full NixOS system (aarch64-linux when this system is Darwin, as
+            # kekkai): the toplevel's drvPath forces every option and unit without building.
+            moduleEval = inputs.nixpkgs.lib.nixosSystem {
               modules = [
                 self.nixosModules.default
                 {
-                  config._module.args.pkgs = pkgs;
-                  options.environment.systemPackages = lib.mkOption {
-                    type = lib.types.listOf lib.types.package;
+                  nixpkgs.hostPlatform = if pkgs.stdenv.hostPlatform.isLinux then system else "aarch64-linux";
+                  nixpkgs.overlays = [ self.overlays.default ];
+                  boot.loader.grub.enable = false;
+                  fileSystems."/" = {
+                    device = "none";
+                    fsType = "tmpfs";
                   };
-                  config.services.masu.enable = true;
+                  system.stateVersion = "26.05";
+                  services.masu = {
+                    enable = true;
+                    listen = [ "[::]:9472" ];
+                    tls.certFile = "/var/lib/hanko/masu/fullchain.pem";
+                    tls.keyFile = "/var/lib/hanko/masu/key.pem";
+                    tokens."a3f1c2d4e5b6a7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70" = "node:node-a";
+                    retentionDays = null;
+                  };
                 }
               ];
             };
@@ -107,7 +119,7 @@
                 common
                 // {
                   inherit cargoArtifacts;
-                  cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+                  cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
                 }
               );
               # Every line of fixtures/records/records.ndjson through masu's record validation:
@@ -137,7 +149,7 @@
               '';
 
               module-eval = pkgs.writeText "module-eval" (
-                lib.concatMapStrings (p: p.name) moduleEval.config.environment.systemPackages
+                builtins.unsafeDiscardStringContext moduleEval.config.system.build.toplevel.drvPath
               );
             };
 
