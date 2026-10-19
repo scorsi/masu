@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod read;
 pub mod record;
 pub mod seal;
+pub mod server;
 pub mod store;
 pub mod time;
 

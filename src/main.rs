@@ -1,13 +1,19 @@
-//! masu command line. M0: `masu validate --metrics <url|file>` (ADR 0005).
+//! masu command line: `serve`, `read`, `verify`, `check-config` (M1) and `validate` (M0).
 
 use masu::convention;
 use masu::exposition::Format;
+use masu::read::Query;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-const USAGE: &str = "usage: masu validate --metrics <http://host:port/path | file>";
+const USAGE: &str = "usage: masu serve <config.toml>
+       masu check-config <config.toml>
+       masu read <root> --node <name> [--service <s>] [--metric <name or prefix>] [--from <ts>] [--to <ts>] [--raw]
+       masu verify <root>
+       masu validate --metrics <http://host:port/path | file>";
 /// Far above the agent's 2 MiB body cap; only guards memory.
 const MAX_RESPONSE_BYTES: u64 = 64 << 20;
 
@@ -15,12 +21,87 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["validate", "--metrics", target] => validate(target),
+        ["serve", config] => match load_config(config).and_then(masu::server::serve) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                masu::log::error("serve", &e, serde_json::json!({}));
+                ExitCode::FAILURE
+            }
+        },
+        ["check-config", config] => match load_config(config) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("masu: {config}: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        ["verify", root] => match masu::read::verify(Path::new(root), &mut std::io::stdout()) {
+            Ok(errors) if errors.is_empty() => ExitCode::SUCCESS,
+            Ok(_) => ExitCode::FAILURE,
+            Err(e) => {
+                eprintln!("masu: {root}: {e}");
+                ExitCode::from(2)
+            }
+        },
+        ["read", root, ref rest @ ..] => read(root, rest),
         ["--version"] => {
             println!("masu {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         _ => {
             eprintln!("{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn load_config(path: &str) -> Result<masu::config::Config, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    masu::config::Config::parse(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+fn read(root: &str, args: &[&str]) -> ExitCode {
+    let mut q = Query {
+        node: String::new(),
+        service: None,
+        metric: None,
+        from: None,
+        to: None,
+        raw: false,
+    };
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        if *flag == "--raw" {
+            q.raw = true;
+            continue;
+        }
+        let Some(value) = it.next() else {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        let value = value.to_string();
+        match *flag {
+            "--node" => q.node = value,
+            "--service" => q.service = Some(value),
+            "--metric" => q.metric = Some(value),
+            "--from" => q.from = Some(value),
+            "--to" => q.to = Some(value),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let ts_ok = |t: &Option<String>| t.as_deref().is_none_or(masu::record::is_timestamp);
+    if q.node.is_empty() || !ts_ok(&q.from) || !ts_ok(&q.to) {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+    let mut out = std::io::BufWriter::new(std::io::stdout());
+    match masu::read::read(Path::new(root), &q, &mut out).and_then(|()| out.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("masu: {root}: {e}");
             ExitCode::from(2)
         }
     }
