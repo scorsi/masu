@@ -13,7 +13,8 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = {
     imports = [ common.node ];
-    fileSystems."/var/lib/masu" = {
+    # Not `fileSystems`: qemu-vm.nix replaces a test node's fileSystems with virtualisation.fileSystems.
+    virtualisation.fileSystems."/var/lib/masu" = {
       device = "masu-data";
       fsType = "tmpfs";
       options = [

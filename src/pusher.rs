@@ -255,6 +255,8 @@ async fn scenario(args: &Args, client: &Client) {
     let node = args.get("node");
     let other_node = args.opts.get("other-node").map_or("node-b", String::as_str);
     let mut pushed: HashSet<Vec<u8>> = HashSet::new();
+    // Gaps counted before a restart: the counter starts again from 0 in the new process.
+    let mut gaps_before_restart = 0;
     for (i, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let n = i + 1;
         if let Some(push) = step.get("push") {
@@ -345,10 +347,15 @@ async fn scenario(args: &Args, client: &Client) {
                 assert_eq!(duplicates, want, "step {n}: duplicates");
             }
             if let Some(want) = check["gaps"].as_u64() {
-                assert_eq!(gaps(args.get("metrics")).await, want, "step {n}: gaps");
+                assert_eq!(
+                    gaps_before_restart + gaps(args.get("metrics")).await,
+                    want,
+                    "step {n}: gaps"
+                );
             }
             println!("step {n}: check ok ({seqs:?})");
         } else if step.get("restart").is_some() {
+            gaps_before_restart += gaps(args.get("metrics")).await;
             sh(args.get("restart"));
             client.wait_up().await;
             println!("step {n}: restarted");
