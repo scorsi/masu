@@ -17,6 +17,9 @@ One JSON object per line:
 
 - `input`: the bytes of `PushRequest.records[i]`, UTF-8, exactly as pushed (no trailing newline
   unless the fixture is about one).
+- `input_b64`: the same bytes, standard base64 with padding (RFC 4648 section 4), for records
+  that cannot sit in a JSON string (not valid UTF-8). nisshi's fixtures use the same name and
+  meaning.
 - `valid`: whether masu stores it.
 - `reason`: `""` when valid, else the exact `PushRejected.reason`.
 
@@ -27,7 +30,7 @@ A record too large to sit literally in the file has `generate` instead of `input
 ```
 
 The record is `prefix + fill × count + suffix` (`fill` repeated `count` times), as UTF-8 bytes.
-Every line has exactly one of `input` and `generate`.
+Every line has exactly one of `input`, `input_b64` and `generate`.
 
 ## Sizes
 
@@ -37,23 +40,51 @@ record is at most **4 194 261 bytes**. The two generated lines sit on each side 
 
 ## Reasons
 
-masu reports the first rule broken, in this order:
+masu reports the first rule broken, in this order. The vocabulary is the same as nisshi's,
+except `unexpected-field:raw_b64` (scrape records only).
 
-| Reason | Rule |
+| # | Reason | Rule |
+|---|---|---|
+| 1 | `record-too-large` | more than 4 194 261 bytes |
+| 2 | `not-utf8` | not valid UTF-8 |
+| 3 | `framing` | the bytes do not start with `{` and end with `}`, or contain CR or LF (masu stores one record per line and inserts `recv_ts` before the last byte) |
+| 4 | `not-json` | not a single valid JSON value |
+| 5 | `not-object` | valid JSON, but not an object |
+| 6 | `duplicate-field:<f>` | a top-level member name present twice; `<f>` is the first name repeated, after unescaping (`"\u0076"` is `v`) |
+| 7 | `reserved-field:recv_ts` | `recv_ts` present: a store field |
+| 8 | `missing-field:<f>`, `<f>-format` | the envelope fields `v`, `ts`, `node`, `service`, `stream`, `seq`, `up`, `dur_us` in this order, then `content_type` and `body` when `up` is true, `error` when it is false: `missing-field:<f>` when absent, `<f>-format` when of the wrong JSON type or format (below) |
+| 9 | `raw_b64-format`, `unexpected-field:raw_b64` | `raw_b64` present: not a string, or without `error` starting with `rejected:` |
+
+Field formats (`<f>-format`):
+
+| Field | Valid |
 |---|---|
-| `record-too-large` | more than 4 194 261 bytes |
-| `not-json` | not a single UTF-8 JSON value |
-| `not-object` | JSON, but not an object |
-| `framing` | the bytes do not start with `{` and end with `}`, or contain CR or LF (masu stores one record per line and inserts `recv_ts` before the last byte) |
-| `reserved-field:recv_ts` | `recv_ts` present: a store field |
-| `missing-field:<f>` | an envelope field absent: `v`, `ts`, `node`, `service`, `stream`, `seq`, `up`, `dur_us` in this order; then `content_type` and `body` when `up` is true, `error` when it is false |
-| `field-type:<f>` | that field of the wrong JSON type (`v`, `seq`, `dur_us`: non-negative integers; `up`: boolean; the others: strings) |
-| `unsupported-version` | `v` is not `1` (checked right after `v`) |
-| `ts-format` | `ts` not UTC RFC 3339 with exactly 9 fractional digits and `Z`, or not a real date and time (checked right after `ts`) |
-| `node-format` | `node` not `[a-z0-9][a-z0-9-]{0,62}` (checked right after `node`) |
-| `stream-format` | `stream` not 32 lowercase hex digits (the 16-byte `stream_id`) (checked right after `stream`) |
-| `unexpected-field:raw_b64` | `raw_b64` present without `error` starting with `rejected:` |
+| `v` | the integer `1` |
+| `ts` | a string, UTC RFC 3339 with exactly 9 fractional digits and `Z`, a real date and time |
+| `node` | a string matching `[a-z0-9][a-z0-9-]{0,62}` |
+| `stream` | a string of 32 lowercase hex digits (the 16-byte `stream_id`) |
+| `seq`, `dur_us` | a non-negative integer |
+| `up` | a boolean |
+| `service`, `content_type`, `body`, `error` | a string |
 
-Fields not listed are not checked: a newer agent may add one. Checks that need the request
-(`node`, `stream`, `seq` against `PushRequest`, e.g. `seq-mismatch`, `node-mismatch` in
-ingest.proto) belong to the ingestion path (milestone M1) and are not in this file.
+`not-object` has no fixture: once `framing` holds, the bytes start with `{`, and a valid JSON
+value starting with `{` is an object. masu keeps the check; the reason exists for nisshi's
+vocabulary.
+
+Duplicates are checked at the top level only: a nested object is not an envelope field.
+
+Fields not listed are not checked: a newer agent may add one.
+
+## Request checks (ingestion path, milestone M1)
+
+Checks that need the `PushRequest` are not in this file; they are made by `POST /v1/push`
+(ADR 0003), with the same 400 `PushRejected` body:
+
+| Reason | Level | Rule |
+|---|---|---|
+| `node-mismatch` | request (no `record_index`) | `PushRequest.node` is not the authenticated node |
+| `stream-id-format` | request (no `record_index`) | `stream_id` is not 16 bytes |
+| `first-seq-zero` | request (no `record_index`) | `first_seq` is 0 |
+| `node-mismatch` | record (`record_index`) | the record's `node` is not `PushRequest.node` |
+| `stream-mismatch` | record (`record_index`) | the record's `stream` is not the hex of `stream_id` |
+| `seq-mismatch` | record (`record_index`) | the record's `seq` is not `first_seq + i` |

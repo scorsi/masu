@@ -7,9 +7,14 @@ use prost::Message;
 use serde_json::Value;
 
 fn input(line: &Value) -> Vec<u8> {
+    let forms = ["input", "input_b64", "generate"];
+    let present = forms.iter().filter(|f| line.get(**f).is_some()).count();
+    assert_eq!(present, 1, "exactly one of {forms:?}");
     if let Some(s) = line["input"].as_str() {
-        assert!(line.get("generate").is_none());
         return s.as_bytes().to_vec();
+    }
+    if let Some(s) = line["input_b64"].as_str() {
+        return base64(s);
     }
     let g = &line["generate"];
     let fill = g["fill"].as_str().unwrap();
@@ -21,6 +26,36 @@ fn input(line: &Value) -> Vec<u8> {
     ]
     .concat()
     .into_bytes()
+}
+
+/// Standard base64 with padding (RFC 4648 section 4); panics on anything else.
+fn base64(s: &str) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    assert!(s.len().is_multiple_of(4), "base64 length");
+    let mut out = Vec::new();
+    for chunk in s.as_bytes().chunks(4) {
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        assert!(pad <= 2, "base64 padding");
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            let d = ALPHABET
+                .iter()
+                .position(|&a| a == c)
+                .expect("base64 alphabet");
+            n = n << 6 | d as u32;
+        }
+        n <<= 6 * pad;
+        out.extend_from_slice(&n.to_be_bytes()[1..4 - pad]);
+    }
+    out
+}
+
+#[test]
+fn base64_decodes() {
+    assert_eq!(base64("/w=="), [0xff]);
+    assert_eq!(base64("eyJ2IjoxfQ=="), br#"{"v":1}"#);
+    assert_eq!(base64("YWJj"), b"abc");
+    assert_eq!(base64("YWI="), b"ab");
 }
 
 #[test]
@@ -46,14 +81,19 @@ fn records_fixtures() {
         );
         reasons.insert(reason.to_string());
     }
-    // The milestone's list (M0): each one exercised.
+    // The milestone's list (M0) and the owner decisions of 2026-10-19: each one exercised.
+    // `not-object` has no fixture: after `framing`, valid JSON is always an object.
     for r in [
         "missing-field:ts",
         "ts-format",
         "missing-field:body",
         "reserved-field:recv_ts",
-        "not-object",
         "record-too-large",
+        "not-utf8",
+        "framing",
+        "not-json",
+        "duplicate-field:v",
+        "v-format",
     ] {
         assert!(reasons.contains(r), "no fixture for {r}");
     }

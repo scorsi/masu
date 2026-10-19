@@ -2,7 +2,10 @@
 //! record before storing it. The errors are the exact `PushRejected.reason` strings, published
 //! with their examples in fixtures/records/ (ADR 0009).
 
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
+use std::fmt;
 
 /// A stored record is at most 4 MiB.
 pub const MAX_STORED_BYTES: usize = 4 * 1024 * 1024;
@@ -13,20 +16,16 @@ pub const MAX_PUSHED_BYTES: usize = MAX_STORED_BYTES - RECV_TS_MEMBER_BYTES;
 
 /// Checks one pushed record; `Err` holds the `PushRejected.reason`.
 ///
-/// One reason per record, the first rule broken in this order: size, JSON, object, framing,
-/// `recv_ts`, then the envelope fields in the order of storage-format.md.
+/// One reason per record, the first rule broken in this order: size, UTF-8, framing, JSON,
+/// object, duplicate member, `recv_ts`, then the envelope fields in the order of
+/// storage-format.md, then `raw_b64`.
 pub fn check(record: &[u8]) -> Result<(), String> {
     if record.len() > MAX_PUSHED_BYTES {
         return Err("record-too-large".into());
     }
-    // shortcut: a duplicated key keeps its last value (serde_json); reject duplicates if hikyaku
-    // or a store ever reads records with a first-wins parser.
-    let Ok(value) = serde_json::from_slice::<Value>(record) else {
-        return Err("not-json".into());
-    };
-    let Some(obj) = value.as_object() else {
-        return Err("not-object".into());
-    };
+    if std::str::from_utf8(record).is_err() {
+        return Err("not-utf8".into());
+    }
     // Stored as one NDJSON line, with recv_ts spliced in before the final byte.
     if record.first() != Some(&b'{')
         || record.last() != Some(&b'}')
@@ -34,27 +33,25 @@ pub fn check(record: &[u8]) -> Result<(), String> {
     {
         return Err("framing".into());
     }
+    let Ok(value) = serde_json::from_slice::<Value>(record) else {
+        return Err("not-json".into());
+    };
+    // Unreachable after framing (valid JSON starting with `{` is an object); kept for the map.
+    let Some(obj) = value.as_object() else {
+        return Err("not-object".into());
+    };
+    // serde_json keeps the last of duplicated members: a second pass finds them.
+    if let Ok(FirstDuplicate(Some(name))) = serde_json::from_slice(record) {
+        return Err(format!("duplicate-field:{name}"));
+    }
     if obj.contains_key("recv_ts") {
         return Err("reserved-field:recv_ts".into());
     }
-    if field(obj, "v", Value::as_u64)? != 1 {
-        return Err("unsupported-version".into());
-    }
-    if !is_timestamp(field(obj, "ts", Value::as_str)?) {
-        return Err("ts-format".into());
-    }
-    if !is_node(field(obj, "node", Value::as_str)?) {
-        return Err("node-format".into());
-    }
+    field(obj, "v", |v| v.as_u64().filter(|&n| n == 1))?;
+    field(obj, "ts", |v| v.as_str().filter(|s| is_timestamp(s)))?;
+    field(obj, "node", |v| v.as_str().filter(|s| is_node(s)))?;
     field(obj, "service", Value::as_str)?;
-    let stream = field(obj, "stream", Value::as_str)?;
-    if stream.len() != 32
-        || !stream
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return Err("stream-format".into());
-    }
+    field(obj, "stream", |v| v.as_str().filter(|s| is_stream(s)))?;
     field(obj, "seq", Value::as_u64)?;
     let up = field(obj, "up", Value::as_bool)?;
     field(obj, "dur_us", Value::as_u64)?;
@@ -74,6 +71,8 @@ pub fn check(record: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// `missing-field:<name>` when absent, `<name>-format` when `get` refuses the value (wrong JSON
+/// type or wrong format).
 fn field<'a, T>(
     obj: &'a Map<String, Value>,
     name: &str,
@@ -82,7 +81,40 @@ fn field<'a, T>(
     let v = obj
         .get(name)
         .ok_or_else(|| format!("missing-field:{name}"))?;
-    get(v).ok_or_else(|| format!("field-type:{name}"))
+    get(v).ok_or_else(|| format!("{name}-format"))
+}
+
+/// The first top-level member name seen twice (after unescaping), if any.
+struct FirstDuplicate(Option<String>);
+
+impl<'de> Deserialize<'de> for FirstDuplicate {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Members;
+        impl<'de> Visitor<'de> for Members {
+            type Value = FirstDuplicate;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<FirstDuplicate, A::Error> {
+                let mut seen = HashSet::new();
+                let mut first = None;
+                // Read to the end: serde_json checks the closing `}` after the visitor.
+                while let Some(name) = map.next_key::<String>()? {
+                    map.next_value::<IgnoredAny>()?;
+                    if first.is_none() && !seen.insert(name.clone()) {
+                        first = Some(name);
+                    }
+                }
+                Ok(FirstDuplicate(first))
+            }
+        }
+        d.deserialize_map(Members)
+    }
+}
+
+/// 32 lowercase hex digits: the 16-byte `stream_id`.
+fn is_stream(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// UTC RFC 3339 with exactly 9 fractional digits and `Z`: `2026-10-19T08:14:00.000213904Z`.
