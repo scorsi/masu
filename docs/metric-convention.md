@@ -112,7 +112,7 @@ hikyaku_spool_paused{signal="logs"}
 hikyaku_unacked_records{signal="logs"}
 hikyaku_oldest_unacked_timestamp_seconds{signal="logs"}
 hikyaku_scrapes_total{target="annai",result="ok|error|series-limit|skipped"}
-hikyaku_push_requests_total{signal="logs",code="200|400|401|413|507|5xx|network"}
+hikyaku_push_requests_total{signal="logs",code="200|400|401|403|413|507|5xx|network"}
 hikyaku_journald_suppressed_lines_total{unit="annai"}
 hikyaku_journal_gaps_total
 hikyaku_rejected_records_total{signal="logs",reason="ts-format"}
