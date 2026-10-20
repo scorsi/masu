@@ -90,8 +90,9 @@ in
 
     metrics.listen = mkOption {
       type = types.nullOr types.str;
-      default = "127.0.0.1:9473";
-      description = "Loopback address of the plain-HTTP `/metrics` listener (metric convention); `null` disables it.";
+      default = null;
+      example = "127.0.0.1:9473";
+      description = "Loopback address of the plain-HTTP `/metrics` listener (metric convention); `null` (the default) disables it, the deployment chooses the port.";
     };
   };
 

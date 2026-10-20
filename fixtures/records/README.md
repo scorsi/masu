@@ -78,10 +78,15 @@ Fields not listed are not checked: a newer agent may add one.
 ## Request checks (ingestion path, milestone M1)
 
 Checks that need the `PushRequest` are not in this file; they are made by `POST /v1/push`
-(ADR 0003), with the same 400 `PushRejected` body:
+(ADR 0003), with the same 400 `PushRejected` body, in this order (the first failing check is
+answered). Authentication comes first: 401 without a known token, 403 for a `reader` token
+(ADR 0010). A body that is not zstd is refused, never read as plain protobuf.
 
 | Reason | Level | Rule |
 |---|---|---|
+| `content-encoding` | request (no `record_index`) | `Content-Encoding` is not `zstd` |
+| `body-zstd` | request (no `record_index`) | the body is not a valid zstd frame |
+| `body-protobuf` | request (no `record_index`) | the decompressed body is not a `PushRequest` |
 | `node-mismatch` | request (no `record_index`) | `PushRequest.node` is not the authenticated node |
 | `stream-id-format` | request (no `record_index`) | `stream_id` is not 16 bytes |
 | `first-seq-zero` | request (no `record_index`) | `first_seq` is 0 |

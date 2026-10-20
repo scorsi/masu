@@ -49,7 +49,7 @@ impl Metrics {
         let m = Metrics::default();
         m.add("masu_duplicate_records_total", &[], 0);
         m.add("masu_seq_gaps_total", &[], 0);
-        for code in ["200", "400", "401", "413", "500", "507"] {
+        for code in ["200", "400", "401", "403", "413", "500", "507"] {
             m.add("masu_push_requests_total", &[("code", code)], 0);
         }
         for result in ["ok", "error"] {

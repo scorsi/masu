@@ -137,11 +137,19 @@ pkgs.testers.runNixOSTest {
         out = machine.succeed("${masu} verify ${root}")
         assert "node-a/2026-10-19: ok (25 records)" in out and "node-a/2026-10-20: ok (5 records)" in out, out
 
-    with subtest("status for the reader, 401 otherwise; own metrics conform"):
+    with subtest("status for the reader, 403 for a node, 401 without a token (ADR 0010); own metrics conform"):
         assert curl_status("${common.tokens.reader}") == "200"
         machine.succeed("jq -e -f ${statusCheck} /root/status.json")
-        assert curl_status("${common.tokens.nodeA}") == "401"
+        assert curl_status("${common.tokens.nodeA}") == "403"
+        assert curl_status("unknown-token") == "401"
         assert curl_status(None) == "401"
+        code = machine.succeed(
+            "curl -s -o /dev/null -w '%{http_code}' --cacert ${common.certs}/ca.pem"
+            " -H 'Authorization: Bearer ${common.tokens.reader}' -H 'Content-Type: application/x-protobuf'"
+            " -H 'Content-Encoding: zstd' --data-binary @/dev/null https://localhost:9472/v1/push"
+        ).strip()
+        assert code == "403", code
+        machine.succeed("curl -s http://127.0.0.1:9473/metrics | grep -x 'masu_push_requests_total{code=\"403\"} 1'")
         machine.succeed("${masu} validate --metrics http://127.0.0.1:9473/metrics")
         machine.succeed("curl -s http://127.0.0.1:9473/metrics | grep -x 'masu_records_total{source_node=\"node-a\"} 5'")
 

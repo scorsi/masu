@@ -52,6 +52,8 @@ rec {
           ${sha256 tokens.nodeB} = "node:node-b";
           ${sha256 tokens.reader} = "reader";
         };
+        # Explicit: the module default is null (disabled); the pusher reads this port.
+        metrics.listen = "127.0.0.1:9473";
         # Small, so that a filled test filesystem crosses it (disk-full scenario).
         diskReserve = 8 * 1024 * 1024;
       };

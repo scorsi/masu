@@ -157,36 +157,54 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Fu
     Ok(response)
 }
 
+/// 401 without a known token, 403 for a known token whose identity lacks the role (ADR 0010).
+fn refuse(path: &str, id: Option<Identity>) -> Response<Full> {
+    let (status, msg) = match id {
+        None => (StatusCode::UNAUTHORIZED, "no or bad credentials"),
+        Some(_) => (StatusCode::FORBIDDEN, "identity lacks the role"),
+    };
+    crate::log::warn("auth-failed", msg, serde_json::json!({"path": path}));
+    respond(status, "text/plain", Vec::new())
+}
+
+fn is_zstd(content_encoding: Option<&str>) -> bool {
+    content_encoding.is_some_and(|v| v.eq_ignore_ascii_case("zstd"))
+}
+
+/// The transport checks after `content-encoding`, in order: `body-zstd`, then `body-protobuf`
+/// (fixtures/records/README.md); `Err(None)` past 64 MiB decompressed (413).
+fn decode(compressed: &[u8]) -> Result<PushRequest, Option<&'static str>> {
+    let mut raw = Vec::new();
+    let decoded = zstd::Decoder::new(compressed)
+        .and_then(|d| d.take(MAX_DECOMPRESSED as u64 + 1).read_to_end(&mut raw));
+    if decoded.is_err() {
+        return Err(Some("body-zstd"));
+    }
+    if raw.len() > MAX_DECOMPRESSED {
+        return Err(None);
+    }
+    PushRequest::decode(Bytes::from(raw)).map_err(|_| Some("body-protobuf"))
+}
+
 async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
-    let Some(Identity::Node(node)) = app.identity(&req) else {
-        crate::log::warn(
-            "auth-failed",
-            "no or bad credentials",
-            serde_json::json!({"path": "/v1/push"}),
-        );
-        return respond(StatusCode::UNAUTHORIZED, "text/plain", Vec::new());
+    let node = match app.identity(&req) {
+        Some(Identity::Node(node)) => node,
+        id => return refuse("/v1/push", id),
     };
     let header = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
     if header(CONTENT_LENGTH).and_then(|v| v.parse::<usize>().ok()) > Some(MAX_COMPRESSED) {
         return respond(StatusCode::PAYLOAD_TOO_LARGE, "text/plain", Vec::new());
     }
-    if !header(CONTENT_ENCODING).is_some_and(|v| v.eq_ignore_ascii_case("zstd")) {
+    if !is_zstd(header(CONTENT_ENCODING)) {
         return rejected(None, "content-encoding");
     }
     let Ok(compressed) = read_body(req.into_body(), MAX_COMPRESSED).await else {
         return respond(StatusCode::PAYLOAD_TOO_LARGE, "text/plain", Vec::new());
     };
-    let mut raw = Vec::new();
-    let decoded = zstd::Decoder::new(&compressed[..])
-        .and_then(|d| d.take(MAX_DECOMPRESSED as u64 + 1).read_to_end(&mut raw));
-    if decoded.is_err() {
-        return rejected(None, "body-zstd");
-    }
-    if raw.len() > MAX_DECOMPRESSED {
-        return respond(StatusCode::PAYLOAD_TOO_LARGE, "text/plain", Vec::new());
-    }
-    let Ok(request) = PushRequest::decode(Bytes::from(raw)) else {
-        return rejected(None, "body-protobuf");
+    let request = match decode(&compressed) {
+        Ok(r) => r,
+        Err(Some(reason)) => return rejected(None, reason),
+        Err(None) => return respond(StatusCode::PAYLOAD_TOO_LARGE, "text/plain", Vec::new()),
     };
     let store = app.store.clone();
     let reply = tokio::task::spawn_blocking(move || store.lock().unwrap().push(&node, &request))
@@ -248,13 +266,9 @@ struct AgentJson {
 }
 
 fn status(app: &Arc<App>, req: &Request<Incoming>) -> Response<Full> {
-    if app.identity(req) != Some(Identity::Reader) {
-        crate::log::warn(
-            "auth-failed",
-            "no or bad credentials",
-            serde_json::json!({"path": "/v1/status"}),
-        );
-        return respond(StatusCode::UNAUTHORIZED, "text/plain", Vec::new());
+    match app.identity(req) {
+        Some(Identity::Reader) => {}
+        id => return refuse("/v1/status", id),
     }
     let s = app.store.lock().unwrap();
     let body = StatusJson {
@@ -503,6 +517,31 @@ pub fn serve(cfg: Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_codes() {
+        assert_eq!(refuse("/v1/push", None).status(), 401);
+        assert_eq!(refuse("/v1/push", Some(Identity::Reader)).status(), 403);
+        let node = Identity::Node("node-a".into());
+        assert_eq!(refuse("/v1/status", Some(node)).status(), 403);
+    }
+
+    #[test]
+    fn transport_checks_in_order() {
+        assert!(is_zstd(Some("zstd")) && is_zstd(Some("ZSTD")));
+        assert!(!is_zstd(None) && !is_zstd(Some("gzip")) && !is_zstd(Some("identity")));
+        assert_eq!(decode(b"not zstd").err(), Some(Some("body-zstd")));
+        let garbage = zstd::encode_all(&[0xffu8; 8][..], 0).unwrap();
+        assert_eq!(decode(&garbage).err(), Some(Some("body-protobuf")));
+        let req = PushRequest {
+            node: "node-a".into(),
+            ..Default::default()
+        };
+        let body = zstd::encode_all(&req.encode_to_vec()[..], 0).unwrap();
+        assert!(decode(&body).is_ok_and(|r| r == req));
+        // The request-level reasons that follow (node-mismatch, stream-id-format,
+        // first-seq-zero) are checked by Store::push: store::tests::response_table.
+    }
 
     #[test]
     fn base64_encodes() {

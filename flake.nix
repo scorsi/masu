@@ -153,9 +153,12 @@
                 touch $out
               '';
 
-              module-eval = pkgs.writeText "module-eval" (
-                builtins.unsafeDiscardStringContext moduleEval.config.system.build.toplevel.drvPath
-              );
+              # The metrics listener is off unless the deployment sets a port.
+              module-eval =
+                assert moduleEval.config.services.masu.metrics.listen == null;
+                pkgs.writeText "module-eval" (
+                  builtins.unsafeDiscardStringContext moduleEval.config.system.build.toplevel.drvPath
+                );
             }
             // vmTests;
 
