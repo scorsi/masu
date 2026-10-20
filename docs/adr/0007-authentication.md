@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-19
 
+Superseded in part by [0010](0010-forbidden-for-wrong-role.md) (403 for a valid token without the role).
+
 ## Context
 
 Same need and same constraints as nisshi (nisshi ADR 0008): refuse unknown agents, bind a

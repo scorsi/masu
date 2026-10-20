@@ -14,3 +14,4 @@ Decision / Consequences. A decision is changed by a new ADR that supersedes the 
 | [0007](0007-authentication.md) | Authentication before and after hanko |
 | [0008](0008-read-and-status.md) | Reading and status |
 | [0009](0009-testing.md) | Testing |
+| [0010](0010-forbidden-for-wrong-role.md) | 403 for a valid token without the role |
