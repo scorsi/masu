@@ -94,7 +94,7 @@ genkan_certificate_expiry_timestamp_seconds{certificate="edge"} 1799020800
 
 ```
 kekkai_build_info{version="0.4.0"} 1
-kekkai_peer_path{peer="node-b",path="direct"} 1
+kekkai_peer_path{peer="node-b",via="direct"} 1
 kekkai_handshakes_total{peer="node-b",result="ok"} 41
 kekkai_rx_bytes_total{peer="node-b"} 912331
 kekkai_tx_bytes_total{peer="node-b"} 1203312

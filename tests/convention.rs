@@ -82,16 +82,11 @@ fn node_exporter_scrape() {
 /// Every exposition example of docs/metric-convention.md passes. The block of the stack's own
 /// metrics lists names, not samples: each line becomes a sample (first alternative of `a|b`,
 /// value 0), and the `nisshi_…` placeholder is skipped.
-///
-/// Known conflict, pending the owner: the kekkai example labels `kekkai_peer_path` with `path`,
-/// a forbidden label name of the same document. The validator follows the failure list; this
-/// test pins that it is the only violation in the examples.
 #[test]
 fn convention_examples_pass() {
     let doc = include_str!("../docs/metric-convention.md");
     let blocks: Vec<&str> = doc.split("```").skip(1).step_by(2).collect();
     assert!(blocks.len() >= 5, "examples not found");
-    let mut conflicts = 0;
     for block in blocks {
         let body = block.strip_prefix('\n').unwrap_or(block);
         let text = if body.lines().any(|l| l.starts_with("hikyaku_")) {
@@ -109,12 +104,7 @@ fn convention_examples_pass() {
         } else {
             body.to_string()
         };
-        let mut v = convention::validate(text.as_bytes(), Format::Prometheus);
-        v.retain(|x| {
-            !(x.rule == Rule::ForbiddenLabel && x.message.starts_with("`kekkai_peer_path`"))
-        });
+        let v = convention::validate(text.as_bytes(), Format::Prometheus);
         assert!(v.is_empty(), "{text}\n{v:?}");
-        conflicts += usize::from(text.contains("kekkai_peer_path{peer=\"node-b\",path="));
     }
-    assert_eq!(conflicts, 1);
 }
