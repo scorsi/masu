@@ -1,0 +1,10 @@
+{
+  "name": "stream-owner",
+  "steps": [
+    {"push": {"first_seq": 1, "count": 10}, "expect": {"status": 200, "acked_seq": 10}},
+    {"push": {"token": "other-node", "node": "other", "first_seq": 11, "count": 10}, "expect": {"status": 403, "reason": "stream-owner", "record_index": null}},
+    {"check": {"stored_seqs": "1-10", "duplicates": 0, "gaps": 0}},
+    {"push": {"first_seq": 11, "count": 10}, "expect": {"status": 200, "acked_seq": 20}},
+    {"check": {"stored_seqs": "1-20", "duplicates": 0, "gaps": 0}}
+  ]
+}

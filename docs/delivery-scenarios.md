@@ -20,7 +20,7 @@ One JSON file per scenario in `fixtures/delivery/`.
 | Step | Fields | Meaning |
 |---|---|---|
 | `push` | `first_seq`, `count`, optional `token` (`valid` default, `none`, `unknown`, `other-node`), `node` (`self` default, `other`), `invalid_at` (index of a record the pusher makes invalid), `stream` (`a` default, `b`: a second stream of the same node) | one `POST /v1/push` |
-| `expect` | `status`, `acked_seq`, `record_index`, `reason` | response checks; absent fields are not checked, `null` means the field must be absent from the response |
+| `expect` | `status`, `acked_seq`, `record_index`, `reason` | response checks; absent fields are not checked, `null` means the field must be absent from the response; `reason` and `record_index` come from the `PushRejected` body of a 400 or a 403 |
 | `check` | `stored_seqs` (ranges, `""` = none), `duplicates`, `gaps` (count of gap reports) | reads the store's files with standard tools, after a store-side flush |
 | `restart` | `kill: true` | `kill -9` the store and start it again |
 | `disk` | `fill: true` / `free: true` | fills or frees the store's test filesystem |
@@ -36,6 +36,7 @@ One JSON file per scenario in `fixtures/delivery/`.
 | `two-streams.json` | two streams of one node, independent `hwm` |
 | `auth.json` | no token, unknown token: 401, nothing stored |
 | `other-node.json` | records of another node: 400 without index (request level) |
+| `stream-owner.json` | the other node's token pushes, as itself, a stream this node pushed first: 403 `stream-owner` without index, nothing stored, `acked_seq` unchanged; this node's next batch stored once |
 | `invalid-record.json` | `invalid_at: 3`: 400, `record_index: 3`, nothing of the batch stored; the same batch with a valid record 3 is accepted |
 | `kill-mid-stream.json` | pushes, `kill -9`, resend from the last acked seq: no loss, no duplicate |
 | `disk-full.json` | `fill`: 507, nothing stored; `free`: same batch accepted |
