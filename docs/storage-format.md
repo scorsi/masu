@@ -80,8 +80,21 @@ see ADR 0006).
    stream), `fsync`, rename, `fsync` the directory.
 3. Only then answer 200.
 
+A commit that creates a day file (or a node directory) also `fsync`s the directories above it
+before step 2. The data directory is locked (`FORMAT`, `flock`) by its one writer.
+
 At start, each open file is truncated to its committed length; a day file absent from
-`state.json` and without a manifest is truncated to zero.
+`state.json` and without a manifest is truncated to zero. An open file shorter than its
+committed length, or missing, stops the start (acknowledged records are gone). A day still in
+`state.json` that has a manifest is an interrupted seal: its file must match the manifest, and
+the day is then sealed (ADR 0006 amendment).
+
+## Restore (writer)
+
+Backups hold `FORMAT`, the sealed data files and the manifests, never `state.json`. Copy them
+into an empty data directory and start masu: without `state.json`, it rebuilds each stream's
+`hwm` (largest `last_seq` of the manifests) and owner node from the manifests, each checked
+against its data file when present, before accepting pushes (ADR 0006 amendment).
 
 ## Reading with standard tools
 

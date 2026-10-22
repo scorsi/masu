@@ -15,7 +15,7 @@ const SEAL_LEVEL: i32 = 9;
 /// 8 MiB window: readable by any zstd with the default limits.
 const WINDOW_LOG: u32 = 23;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub v: u32,
     pub node: String,
@@ -32,7 +32,7 @@ pub struct Manifest {
     pub sealed_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct StreamRange {
     pub stream: String,
     pub first_seq: u64,
@@ -45,6 +45,14 @@ pub fn run(store: &Arc<Mutex<Store>>, retention_days: u32) {
     let today = time::day_of_ns(time::now_ns());
     let (keys, root) = {
         let s = store.lock().unwrap();
+        if let Some(why) = s.broken() {
+            crate::log::error(
+                "seal",
+                "skipped: the writer is stopped",
+                serde_json::json!({"why": why}),
+            );
+            return;
+        }
         let keys: Vec<String> = s
             .state
             .files
@@ -87,88 +95,140 @@ pub fn run(store: &Arc<Mutex<Store>>, retention_days: u32) {
     }
 }
 
-/// Scan, recompress to a temporary file, verify, rename, manifest, drop from the state. Only the
-/// last three steps hold the store lock; nothing writes a past day's file meanwhile.
+/// Scan, recompress to a temporary file, verify, then under the store lock: manifest, rename,
+/// drop from the state. The manifest comes first: from then on the day file, original or
+/// recompressed, matches it, which is how a restart recognises an interrupted seal. Pushes to
+/// the day are refused for the whole seal (`Store::sealing`).
 fn seal_one(store: &Arc<Mutex<Store>>, key: &str) -> io::Result<Manifest> {
-    let (node, day) = key.split_once('/').unwrap();
     let (path, manifest_path) = {
-        let s = store.lock().unwrap();
+        let mut s = store.lock().unwrap();
+        s.sealing.insert(key.into());
         (s.data_path(key), s.manifest_path(key))
     };
+    let result = seal_file(store, key, &path, &manifest_path);
+    store.lock().unwrap().sealing.remove(key);
+    result
+}
+
+fn seal_file(
+    store: &Arc<Mutex<Store>>,
+    key: &str,
+    path: &Path,
+    manifest_path: &Path,
+) -> io::Result<Manifest> {
+    let (node, day) = key.split_once('/').unwrap();
     let tmp = path.with_extension("zst.tmp");
     let mut scan = Scan::default();
     let mut encoder = zstd::Encoder::new(File::create(&tmp)?, SEAL_LEVEL)?;
     encoder.set_parameter(zstd::stream::raw::CParameter::WindowLog(WINDOW_LOG))?;
-    let mut lines = BufReader::new(zstd::Decoder::new(File::open(&path)?)?);
+    let mut lines = open_day(path)?;
     let mut line = Vec::new();
-    loop {
-        line.clear();
-        if lines.read_until(b'\n', &mut line)? == 0 {
-            break;
-        }
+    while next_line(&mut lines, &mut line)? {
         scan.line(&line)?;
         encoder.write_all(&line)?;
     }
     let out = encoder.finish()?;
     out.sync_all()?;
-    // Decompress again: the sealed bytes must hash like the original.
-    let mut check = Sha256::new();
-    let mut decoder = zstd::Decoder::new(File::open(&tmp)?)?;
-    let mut buf = vec![0u8; 1 << 16];
-    let mut n_bytes = 0u64;
-    loop {
-        let n = decoder.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        n_bytes += n as u64;
-        check.update(&buf[..n]);
-    }
-    let content_sha256 = crate::store::hex(&scan.hash.finalize());
-    if crate::store::hex(&check.finalize()) != content_sha256 || n_bytes != scan.bytes {
+    let manifest = scan.manifest(node, day, time::format_ns(time::now_ns()));
+    // Decompress again: the sealed bytes must scan like the original.
+    if scan_file(&tmp)?.manifest(node, day, manifest.sealed_at.clone()) != manifest {
         let _ = fs::remove_file(&tmp);
         return Err(io::Error::other("recompressed file does not match"));
     }
-    let manifest = Manifest {
-        v: 1,
-        node: node.into(),
-        day: day.into(),
-        records: scan.records,
-        uncompressed_bytes: scan.bytes,
-        content_sha256,
-        min_ts: scan.min_ts,
-        max_ts: scan.max_ts,
-        services: scan.services,
-        streams: scan
-            .streams
-            .into_iter()
-            .map(|(stream, (first_seq, last_seq))| StreamRange {
-                stream,
-                first_seq,
-                last_seq,
-            })
-            .collect(),
-        sealed_at: time::format_ns(time::now_ns()),
-    };
 
     let mut s = store.lock().unwrap();
-    fs::rename(&tmp, &path)?;
     let dir = path.parent().unwrap();
-    fsync_dir(dir)?;
     let mtmp = manifest_path.with_extension("json.tmp");
     let mut f = File::create(&mtmp)?;
     f.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
     f.write_all(b"\n")?;
     f.sync_all()?;
-    fs::rename(&mtmp, &manifest_path)?;
+    fs::rename(&mtmp, manifest_path)?;
     fsync_dir(dir)?;
+    s.step("seal-manifest")?;
+    fs::rename(&tmp, path)?;
+    fsync_dir(dir)?;
+    s.step("seal-rename")?;
     s.state.files.remove(key);
     s.write_state()?;
     Ok(manifest)
 }
 
+/// The decompressed lines of a day file, with the archive's window limit (8 MiB, storage-format.md):
+/// a frame asking for more is refused before its buffer is allocated.
+pub fn open_day(path: &Path) -> io::Result<BufReader<zstd::Decoder<'static, BufReader<File>>>> {
+    let mut d = zstd::Decoder::new(File::open(path)?)?;
+    d.window_log_max(WINDOW_LOG)?;
+    Ok(BufReader::new(d))
+}
+
+/// The next line of a decompressed day file into `line`, LF included; `false` at the end. A
+/// line longer than a stored record, or a last line without LF, is an error (storage-format.md).
+pub fn next_line(r: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<bool> {
+    line.clear();
+    let n =
+        Read::take(&mut *r, crate::record::MAX_STORED_BYTES as u64 + 1).read_until(b'\n', line)?;
+    if n == 0 {
+        return Ok(false);
+    }
+    if line.last() != Some(&b'\n') {
+        return Err(io::Error::other(if n > crate::record::MAX_STORED_BYTES {
+            "line longer than a record (4 MiB)"
+        } else {
+            "last line without LF"
+        }));
+    }
+    Ok(true)
+}
+
+/// Scans a whole day file (what its manifest records).
+pub fn scan_file(path: &Path) -> io::Result<Scan> {
+    let mut scan = Scan::default();
+    let mut lines = open_day(path)?;
+    let mut line = Vec::new();
+    while next_line(&mut lines, &mut line)? {
+        scan.line(&line)?;
+    }
+    Ok(scan)
+}
+
+pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
+    serde_json::from_slice(&fs::read(path)?).map_err(|e| io::Error::other(format!("manifest: {e}")))
+}
+
+/// The manifest, after checking that `data` holds exactly what it records.
+pub fn check_sealed(data: &Path, manifest: &Path) -> io::Result<Manifest> {
+    let m = read_manifest(manifest)?;
+    let got = scan_file(data)?.manifest(&m.node, &m.day, m.sealed_at.clone());
+    match differences(&got, &m) {
+        diff if diff.is_empty() => Ok(m),
+        diff => Err(io::Error::other(format!(
+            "data differs from the manifest: {diff}"
+        ))),
+    }
+}
+
+/// The top-level manifest fields that differ, e.g. `content_sha256 <got> != manifest <want>`.
+pub fn differences(got: &Manifest, want: &Manifest) -> String {
+    let (got, want) = (
+        serde_json::to_value(got).unwrap(),
+        serde_json::to_value(want).unwrap(),
+    );
+    let keys: std::collections::BTreeSet<&String> = got
+        .as_object()
+        .unwrap()
+        .keys()
+        .chain(want.as_object().unwrap().keys())
+        .collect();
+    keys.into_iter()
+        .filter(|k| got[k.as_str()] != want[k.as_str()])
+        .map(|k| format!("{k} {} != manifest {}", got[k.as_str()], want[k.as_str()]))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(Default)]
-struct Scan {
+pub struct Scan {
     hash: Sha256,
     bytes: u64,
     records: u64,
@@ -179,7 +239,8 @@ struct Scan {
 }
 
 impl Scan {
-    fn line(&mut self, line: &[u8]) -> io::Result<()> {
+    /// One line, LF included; its parsed record.
+    pub fn line(&mut self, line: &[u8]) -> io::Result<Value> {
         self.hash.update(line);
         self.bytes += line.len() as u64;
         self.records += 1;
@@ -202,7 +263,31 @@ impl Scan {
             e.0 = e.0.min(seq);
             e.1 = e.1.max(seq);
         }
-        Ok(())
+        Ok(v)
+    }
+
+    pub fn manifest(&self, node: &str, day: &str, sealed_at: String) -> Manifest {
+        Manifest {
+            v: 1,
+            node: node.into(),
+            day: day.into(),
+            records: self.records,
+            uncompressed_bytes: self.bytes,
+            content_sha256: crate::store::hex(&self.hash.clone().finalize()),
+            min_ts: self.min_ts.clone(),
+            max_ts: self.max_ts.clone(),
+            services: self.services.clone(),
+            streams: self
+                .streams
+                .iter()
+                .map(|(stream, &(first_seq, last_seq))| StreamRange {
+                    stream: stream.clone(),
+                    first_seq,
+                    last_seq,
+                })
+                .collect(),
+            sealed_at,
+        }
     }
 }
 
@@ -237,6 +322,7 @@ mod tests {
     use super::*;
     use crate::store::tests::{STREAM, lines, open, request, tempdir};
     use crate::store::{Reply, hex};
+    use std::path::PathBuf;
 
     #[test]
     fn seal_is_idempotent_and_retention_keeps_manifests() {
@@ -339,5 +425,139 @@ mod tests {
         );
         drop(s);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// The open day of a store with records 1–40 in two frames, renamed to yesterday as a day
+    /// change would leave it.
+    fn yesterday_store(name: &str) -> (PathBuf, Arc<Mutex<Store>>, String, Vec<String>) {
+        let root = tempdir(name);
+        let mut s = open(&root);
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 1, 20)),
+            Reply::Ok { acked_seq: 20 }
+        );
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 21, 20)),
+            Reply::Ok { acked_seq: 40 }
+        );
+        let key = s.state.files.keys().next().unwrap().clone();
+        let yesterday = time::day_of_ns(time::now_ns() - time::DAY_SECS * time::NS);
+        let old_key = format!("node-a/{yesterday}");
+        fs::rename(s.data_path(&key), s.data_path(&old_key)).unwrap();
+        let len = s.state.files.remove(&key).unwrap();
+        s.state.files.insert(old_key.clone(), len);
+        s.write_state().unwrap();
+        let before = lines(&s, "node-a");
+        (root, Arc::new(Mutex::new(s)), old_key, before)
+    }
+
+    /// F01: a seal interrupted after its manifest, after the rename, or by a failed state write
+    /// leaves a day that the next start recognises as sealed, byte for byte.
+    #[test]
+    fn interrupted_seal_recovers() {
+        for fault in ["seal-manifest", "seal-rename", "state-write"] {
+            let (root, store, key, before) = yesterday_store(fault);
+            let original = fs::read(store.lock().unwrap().data_path(&key)).unwrap();
+            store.lock().unwrap().faults = vec![fault];
+            run(&store, 0);
+            assert!(store.lock().unwrap().state.files.contains_key(&key) || fault == "state-write");
+            drop(store);
+            let s = open(&root);
+            assert!(!s.state.files.contains_key(&key), "{fault}");
+            assert_eq!(lines(&s, "node-a"), before, "{fault}");
+            if fault == "seal-manifest" {
+                assert_eq!(fs::read(s.data_path(&key)).unwrap(), original);
+            }
+            assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 40);
+            check_sealed(&s.data_path(&key), &s.manifest_path(&key)).unwrap();
+            assert!(
+                crate::read::verify(&root, &mut Vec::new())
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(s);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    /// F05: a push the store clock puts on a sealed day, or on a day being sealed, gets 503
+    /// and changes nothing.
+    #[test]
+    fn sealed_day_is_never_written() {
+        let root = tempdir("sealed-day");
+        let mut s = open(&root);
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 1, 5)),
+            Reply::Ok { acked_seq: 5 }
+        );
+        let key = s.state.files.keys().next().unwrap().clone();
+        s.sealing.insert(key.clone());
+        assert!(matches!(
+            s.push("node-a", &request("node-a", &STREAM, 6, 5)),
+            Reply::Unavailable(_)
+        ));
+        s.sealing.clear();
+        let store = Arc::new(Mutex::new(s));
+        // As if the clock had gone back onto a day sealed meanwhile.
+        seal_one(&store, &key).unwrap();
+        let mut s = store.lock().unwrap();
+        let (data, manifest) = (
+            fs::read(s.data_path(&key)).unwrap(),
+            fs::read(s.manifest_path(&key)).unwrap(),
+        );
+        assert!(matches!(
+            s.push("node-a", &request("node-a", &STREAM, 6, 5)),
+            Reply::Unavailable(_)
+        ));
+        assert_eq!(fs::read(s.data_path(&key)).unwrap(), data);
+        assert_eq!(fs::read(s.manifest_path(&key)).unwrap(), manifest);
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 5);
+        // A duplicate stores nothing: still answered.
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 1, 5)),
+            Reply::Ok { acked_seq: 5 }
+        );
+        drop(s);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Restore (cross-review 2.1): the backed-up sealed days in an empty data directory give
+    /// back each stream's hwm and owner; a manifest that does not match its data refuses.
+    #[test]
+    fn restore_rebuilds_the_streams() {
+        let (root, store, key, before) = yesterday_store("restore");
+        run(&store, 0);
+        drop(store);
+        let restored = tempdir("restored");
+        for (from, to) in [
+            ("FORMAT", "FORMAT"),
+            (&format!("archive/{key}.ndjson.zst")[..], ""),
+            (&format!("archive/{key}.manifest.json")[..], ""),
+        ] {
+            let to = if to.is_empty() { from } else { to };
+            fs::create_dir_all(restored.join(to).parent().unwrap()).unwrap();
+            fs::copy(root.join(from), restored.join(to)).unwrap();
+        }
+        let mut s = open(&restored);
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 40);
+        assert_eq!(s.state.streams[&hex(&STREAM)].node, "node-a");
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 11, 10)),
+            Reply::Ok { acked_seq: 40 }
+        );
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 41, 2)),
+            Reply::Ok { acked_seq: 42 }
+        );
+        assert_eq!(lines(&s, "node-a").len(), before.len() + 2);
+        drop(s);
+
+        // The restored data does not match its manifest: no start.
+        fs::remove_file(restored.join("state.json")).unwrap();
+        let data = restored.join(format!("archive/{key}.ndjson.zst"));
+        fs::write(&data, zstd::encode_all(&b"{\"v\":1}\n"[..], 3).unwrap()).unwrap();
+        assert!(Store::open(&restored, 0, Arc::new(crate::metrics::Metrics::new())).is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(restored);
     }
 }

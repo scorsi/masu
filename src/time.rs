@@ -47,7 +47,8 @@ pub fn day_of_ns(ns: i64) -> String {
     format_ns(ns)[..10].to_string()
 }
 
-/// Unix nanoseconds of a `ts` string, `None` unless it has the exact format.
+/// Unix nanoseconds of a `ts` string, `None` unless it has the exact format and fits an `i64`
+/// (1677-09-21T00:12:43.145224192Z to 2262-04-11T23:47:16.854775807Z).
 pub fn parse_ns(ts: &str) -> Option<i64> {
     if !crate::record::is_timestamp(ts) {
         return None;
@@ -55,7 +56,7 @@ pub fn parse_ns(ts: &str) -> Option<i64> {
     let n = |a: usize, b: usize| ts[a..b].parse::<i64>().ok();
     let days = days_from_civil(n(0, 4)?, n(5, 7)?, n(8, 10)?);
     let secs = days * DAY_SECS + n(11, 13)? * 3600 + n(14, 16)? * 60 + n(17, 19)?;
-    Some(secs * NS + n(20, 29)?)
+    i64::try_from(i128::from(secs) * i128::from(NS) + i128::from(n(20, 29)?)).ok()
 }
 
 /// Unix day number of `YYYY-MM-DD`, `None` unless well-formed.
@@ -107,5 +108,16 @@ mod tests {
         assert_eq!(parse_day("2026-10-19"), Some(20745));
         assert_eq!(parse_day("2026-13-19"), None);
         assert!(parse_ns("2026-10-19T08:14:00Z").is_none());
+        // The exact i64 bounds; one nanosecond past them, and far dates, are not representable.
+        assert_eq!(parse_ns("1677-09-21T00:12:43.145224192Z"), Some(i64::MIN));
+        assert_eq!(parse_ns("2262-04-11T23:47:16.854775807Z"), Some(i64::MAX));
+        for ts in [
+            "1677-09-21T00:12:43.145224191Z",
+            "2262-04-11T23:47:16.854775808Z",
+            "1600-01-01T00:00:00.000000000Z",
+            "3000-01-01T00:00:00.000000000Z",
+        ] {
+            assert_eq!(parse_ns(ts), None, "{ts}");
+        }
     }
 }

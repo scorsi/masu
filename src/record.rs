@@ -57,7 +57,8 @@ pub fn check(record: &[u8]) -> Result<Envelope, String> {
         return Err("reserved-field:recv_ts".into());
     }
     field(obj, "v", |v| v.as_u64().filter(|&n| n == 1))?;
-    let ts = field(obj, "ts", |v| v.as_str().filter(|s| is_timestamp(s)))?;
+    // A date outside the i64 nanoseconds of the store is not a `ts` (`ts-format`).
+    let ts_ns = field(obj, "ts", |v| v.as_str().and_then(crate::time::parse_ns))?;
     let node = field(obj, "node", |v| v.as_str().filter(|s| is_node(s)))?;
     field(obj, "service", Value::as_str)?;
     let stream = field(obj, "stream", |v| v.as_str().filter(|s| is_stream(s)))?;
@@ -78,7 +79,7 @@ pub fn check(record: &[u8]) -> Result<Envelope, String> {
         }
     }
     Ok(Envelope {
-        ts_ns: crate::time::parse_ns(ts).ok_or("ts-format")?,
+        ts_ns,
         node: node.into(),
         stream: stream.into(),
         seq,

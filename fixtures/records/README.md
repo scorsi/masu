@@ -60,7 +60,7 @@ Field formats (`<f>-format`):
 | Field | Valid |
 |---|---|
 | `v` | the integer `1` |
-| `ts` | a string, UTC RFC 3339 with exactly 9 fractional digits and `Z`, a real date and time |
+| `ts` | a string, UTC RFC 3339 with exactly 9 fractional digits and `Z`, a real date and time that fits signed 64-bit Unix nanoseconds (1677-09-21T00:12:43.145224192Z to 2262-04-11T23:47:16.854775807Z) |
 | `node` | a string matching `[a-z0-9][a-z0-9-]{0,62}` |
 | `stream` | a string of 32 lowercase hex digits (the 16-byte `stream_id`) |
 | `seq`, `dur_us` | a non-negative integer |

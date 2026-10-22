@@ -28,3 +28,29 @@ tamper-evident chain.
 
 - Disk estimates in [resources](../resources.md).
 - Sealed files never change: incremental backups stay cheap.
+
+## Amendment — 2026-10-22
+
+Status: Accepted — 2026-10-22 (owner decision, after the code review of 2026-10-21).
+
+- **A sealed day is never reopened nor rewritten.** If the store's clock puts a push on a day
+  that is sealed, or whose seal is running, masu refuses the whole push with **503**, logs a
+  `push-failed` error event and changes nothing on disk. The agent keeps its spool and retries;
+  pushes succeed again once the clock is right. A push made only of duplicates stores nothing
+  and is still answered 200.
+- **Seal order.** Scan, recompress to a temporary file and check it, then under the store lock:
+  write the manifest (temporary + rename, directory `fsync`), rename the recompressed file over
+  the original (directory `fsync`), drop the file from `state.json`. A start that finds a day
+  still in `state.json` with a manifest checks that the file, original or recompressed, holds
+  exactly what the manifest records and takes the day as sealed; it never resizes it.
+- **Recovery refuses lost data.** An open file shorter than its committed length, or missing,
+  stops the start with an error instead of being padded or forgotten: its `hwm` would
+  acknowledge records the store no longer has.
+- **Restore.** Backups hold `FORMAT` and the sealed days (data files and manifests), never
+  `state.json` (it may acknowledge open days the backup does not hold). To restore: copy the
+  backed-up files into an empty data directory, start masu. A start without `state.json` reads
+  every manifest (checked against its data file when the file is there; a mismatch stops the
+  start) and rebuilds each stream's `hwm` (the largest `last_seq`) and owner node (ADR 0011)
+  before it accepts pushes, logging one `state-rebuilt` event. Records pushed after the backup
+  and lost with the disk come back as a `seq-gap`; records the backup holds are never stored
+  twice.

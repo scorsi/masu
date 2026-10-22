@@ -6,7 +6,7 @@ use crate::pb::{AgentStatus, PushRequest};
 use crate::record::{self, Envelope};
 use crate::time;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -69,6 +69,9 @@ pub enum Reply {
     },
     /// 507: free space below the reserve, or a write error (rolled back).
     Insufficient(String),
+    /// 503: the store cannot take this push now (its clock puts it on a sealed day, or a failed
+    /// rollback stopped the writer); nothing changed, the agent keeps its spool and retries.
+    Unavailable(String),
 }
 
 fn rejected(record_index: Option<u32>, reason: &str) -> Reply {
@@ -83,6 +86,15 @@ pub struct Store {
     pub state: State,
     pub disk_reserve: u64,
     pub metrics: Arc<Metrics>,
+    /// Day keys whose seal is running: no push may append to them (ADR 0006 amendment).
+    pub sealing: BTreeSet<String>,
+    /// Why the writer stopped (a rollback failed): every push gets 503 until a restart recovers.
+    broken: Option<String>,
+    /// `FORMAT`, locked for the life of the store: one writer per data directory.
+    _lock: File,
+    /// Test hook: the named steps fail as I/O errors (crash and fault injection).
+    #[cfg(test)]
+    pub faults: Vec<&'static str>,
 }
 
 impl Store {
@@ -99,15 +111,25 @@ impl Store {
                     s.trim()
                 )));
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => fs::write(&format, FORMAT)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut f = File::create(&format)?;
+                f.write_all(FORMAT.as_bytes())?;
+                f.sync_all()?;
+            }
             Err(e) => return Err(e),
         }
+        // `archive/` and `FORMAT` durable before anything is written below them.
+        fsync_dir(root)?;
+        let lock = File::open(&format)?;
+        lock.try_lock().map_err(|_| {
+            io::Error::other(format!(
+                "{}: another masu writer holds this data directory",
+                root.display()
+            ))
+        })?;
         let state = match fs::read(root.join("state.json")) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => State {
-                v: 1,
-                ..State::default()
-            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => rebuild(root)?,
             Err(e) => return Err(e),
         };
         let _ = fs::remove_file(root.join("state.json.tmp"));
@@ -116,13 +138,20 @@ impl Store {
             state,
             disk_reserve,
             metrics,
+            sealing: BTreeSet::new(),
+            broken: None,
+            _lock: lock,
+            #[cfg(test)]
+            faults: Vec::new(),
         };
         store.recover()?;
         Ok(store)
     }
 
     /// Every open file back to its committed length; a day file that is neither open nor
-    /// sealed is truncated to zero (an interrupted first commit) and tracked as open.
+    /// sealed is truncated to zero (an interrupted first commit) and tracked as open. An open
+    /// file shorter than its committed length, or missing, refuses the start: acknowledged
+    /// records are gone and the `hwm` would acknowledge them again.
     fn recover(&mut self) -> io::Result<()> {
         let mut seen = Vec::new();
         for node in read_dir_sorted(&self.root.join("archive"))? {
@@ -135,12 +164,27 @@ impl Store {
                     continue;
                 };
                 let key = format!("{node_name}/{day}");
+                let manifest = self.manifest_path(&key);
                 let committed = match self.state.files.get(&key) {
+                    // A seal interrupted after its manifest: the file, original or recompressed,
+                    // must hold exactly what the manifest says; it is sealed, never resized.
+                    Some(_) if manifest.exists() => {
+                        crate::seal::check_sealed(&file, &manifest).map_err(|e| {
+                            io::Error::other(format!("{key}: interrupted seal: {e}"))
+                        })?;
+                        crate::log::info("recover-seal", serde_json::json!({"file": key}));
+                        continue;
+                    }
                     Some(&len) => len,
-                    None if self.manifest_path(&key).exists() => continue,
+                    None if manifest.exists() => continue,
                     None => 0,
                 };
                 let actual = fs::metadata(&file)?.len();
+                if actual < committed {
+                    return Err(io::Error::other(format!(
+                        "{key}: {actual} bytes but {committed} committed: acknowledged records are missing"
+                    )));
+                }
                 if actual != committed {
                     crate::log::warn(
                         "recover-truncate",
@@ -155,9 +199,30 @@ impl Store {
                 seen.push(key);
             }
         }
-        // An open file that disappeared (a deleted day) is forgotten.
+        for (key, &len) in &self.state.files {
+            if len > 0 && !seen.contains(key) && !self.manifest_path(key).exists() {
+                return Err(io::Error::other(format!(
+                    "{key}: committed file missing: acknowledged records are gone"
+                )));
+            }
+        }
+        // Empty or sealed keys left over are forgotten.
         self.state.files.retain(|k, _| seen.contains(k));
         self.write_state()
+    }
+
+    /// Why the writer stopped, if it did (seal and push skip a broken store).
+    pub fn broken(&self) -> Option<&str> {
+        self.broken.as_deref()
+    }
+
+    /// Test hook: `Err` when the step was asked to fail.
+    pub(crate) fn step(&self, _name: &str) -> io::Result<()> {
+        #[cfg(test)]
+        if self.faults.contains(&_name) {
+            return Err(io::Error::other(format!("injected fault: {_name}")));
+        }
+        Ok(())
     }
 
     pub fn root(&self) -> &Path {
@@ -180,6 +245,9 @@ impl Store {
 
     /// The response table of ADR 0003 for one request of the authenticated `node`.
     pub fn push(&mut self, node: &str, req: &PushRequest) -> Reply {
+        if let Some(why) = &self.broken {
+            return Reply::Unavailable(format!("writer stopped: {why}"));
+        }
         if req.node != node {
             return rejected(None, "node-mismatch");
         }
@@ -200,7 +268,8 @@ impl Store {
                 "node-mismatch"
             } else if env.stream != stream {
                 "stream-mismatch"
-            } else if env.seq != req.first_seq + i as u64 {
+            } else if req.first_seq.checked_add(i as u64) != Some(env.seq) {
+                // `first_seq + i` past u64::MAX is no record's seq.
                 "seq-mismatch"
             } else {
                 envelopes.push(env);
@@ -211,15 +280,20 @@ impl Store {
 
         let hwm = self.state.streams.get(&stream).map_or(0, |s| s.hwm);
         let n = req.records.len() as u64;
+        // Every record matched `first_seq + i`: no overflow.
         let last_seq = req.first_seq + n.saturating_sub(1);
         if last_seq <= hwm || n == 0 {
             self.metrics.add("masu_duplicate_records_total", &[], n);
             return Reply::Ok { acked_seq: hwm };
         }
         let skip = hwm.saturating_sub(req.first_seq - 1).min(n) as usize;
-        if skip > 0 {
-            self.metrics
-                .add("masu_duplicate_records_total", &[], skip as u64);
+        let now = time::now_ns();
+        let key = format!("{node}/{}", time::day_of_ns(now));
+        // A sealed day never changes: a store clock behind it refuses until it is right again.
+        if self.sealing.contains(&key) || self.manifest_path(&key).exists() {
+            return Reply::Unavailable(format!(
+                "{key} is sealed: the store clock is behind its sealed days"
+            ));
         }
         let free = self.disk_free();
         if free < self.disk_reserve {
@@ -228,19 +302,22 @@ impl Store {
                 self.disk_reserve
             ));
         }
-
-        let now = time::now_ns();
-        let recv_ts = time::format_ns(now);
-        let mut lines = Vec::new();
-        for bytes in &req.records[skip..] {
-            lines.extend_from_slice(&bytes[..bytes.len() - 1]);
-            lines.extend_from_slice(format!(",\"recv_ts\":\"{recv_ts}\"}}\n").as_bytes());
+        if skip > 0 {
+            self.metrics
+                .add("masu_duplicate_records_total", &[], skip as u64);
         }
-        let frame = match zstd::encode_all(&lines[..], OPEN_LEVEL) {
-            Ok(f) => f,
-            Err(e) => return Reply::Insufficient(format!("zstd: {e}")),
+
+        let member = format!(",\"recv_ts\":\"{}\"}}\n", time::format_ns(now));
+        let records = &req.records[skip..];
+        // One zstd frame per commit, streamed to the file: no second copy of the batch.
+        let write = |file: &mut File| -> io::Result<()> {
+            let mut enc = zstd::Encoder::new(file, OPEN_LEVEL)?;
+            for bytes in records {
+                enc.write_all(&bytes[..bytes.len() - 1])?;
+                enc.write_all(member.as_bytes())?;
+            }
+            enc.finish().map(drop)
         };
-        let key = format!("{node}/{}", time::day_of_ns(now));
         let last_record_ns = envelopes[skip..].iter().map(|e| e.ts_ns).max().unwrap_or(0);
         let stored = (n as usize - skip) as u64;
         let mut next = StreamState {
@@ -252,7 +329,7 @@ impl Store {
         if let Some(prev) = self.state.streams.get(&stream) {
             next.last_record_ns = next.last_record_ns.max(prev.last_record_ns);
         }
-        if let Err(e) = self.commit(&key, &frame, |state| {
+        if let Err(e) = self.commit(&key, write, |state| {
             state.streams.insert(stream.clone(), next.clone());
             if let Some(status) = &req.status {
                 state.agents.insert(node.into(), status.into());
@@ -275,59 +352,136 @@ impl Store {
         }
     }
 
-    /// Steps 1–2 of storage-format.md "Commit": append and fsync, then `state.json` through a
-    /// temporary file. On any error the file is back at its committed length and the state
-    /// unchanged.
+    /// Steps 1–2 of storage-format.md "Commit": append and fsync (with the directories of a new
+    /// file), then `state.json` through a temporary file. An error before the new state is
+    /// renamed in leaves the file at its committed length and the state unchanged; after the
+    /// rename the new state may already be on disk, so its data stays. A failed rollback stops
+    /// the writer.
     fn commit(
         &mut self,
         key: &str,
-        frame: &[u8],
+        write: impl FnOnce(&mut File) -> io::Result<()>,
         update: impl FnOnce(&mut State),
     ) -> io::Result<()> {
         let path = self.data_path(key);
-        fs::create_dir_all(path.parent().unwrap())?;
-        let committed = self.state.files.get(key).copied().unwrap_or(0);
+        let dir = path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&dir)?;
+        let committed = self.state.files.get(key).copied();
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)?;
+        let mut published = false;
         let result = (|| {
-            file.seek(SeekFrom::Start(committed))?;
-            file.write_all(frame)?;
+            if committed.is_none() {
+                // The new file's name, and a new node directory's, durable before the 200.
+                fsync_dir(&dir)?;
+                fsync_dir(&self.root.join("archive"))?;
+            }
+            file.seek(SeekFrom::Start(committed.unwrap_or(0)))?;
+            write(&mut file)?;
+            let len = file.stream_position()?;
             file.sync_data()?;
+            self.step("append")?;
             let mut next = State {
                 v: 1,
                 files: self.state.files.clone(),
                 streams: self.state.streams.clone(),
                 agents: self.state.agents.clone(),
             };
-            next.files
-                .insert(key.into(), committed + frame.len() as u64);
+            next.files.insert(key.into(), len);
             update(&mut next);
             let prev = std::mem::replace(&mut self.state, next);
-            if let Err(e) = self.write_state() {
-                self.state = prev;
-                return Err(e);
-            }
-            Ok(())
+            self.publish_state().map_err(|(e, renamed)| {
+                published = renamed;
+                if !renamed {
+                    self.state = prev;
+                }
+                e
+            })
         })();
-        if result.is_err() {
-            let _ = file.set_len(committed);
-            let _ = file.sync_all();
+        if result.is_err() && !published {
+            let rollback = self
+                .step("rollback")
+                .and_then(|()| file.set_len(committed.unwrap_or(0)))
+                .and_then(|()| file.sync_all());
+            if let Err(e) = rollback {
+                let why = format!("rollback of {key} failed: {e}");
+                crate::log::error("writer-stopped", &why, serde_json::json!({}));
+                self.broken = Some(why);
+            }
         }
         result
     }
 
     /// `state.json.tmp`, fsync, rename, fsync the directory.
     pub fn write_state(&self) -> io::Result<()> {
-        let tmp = self.root.join("state.json.tmp");
-        let mut f = File::create(&tmp)?;
-        f.write_all(&serde_json::to_vec(&self.state)?)?;
-        f.sync_all()?;
-        fs::rename(&tmp, self.root.join("state.json"))?;
-        fsync_dir(&self.root)
+        self.publish_state().map_err(|(e, _)| e)
     }
+
+    /// [`Store::write_state`]; the flag tells whether the rename happened (the new state may be
+    /// on disk).
+    fn publish_state(&self) -> Result<(), (io::Error, bool)> {
+        let tmp = self.root.join("state.json.tmp");
+        let before = |e| (e, false);
+        let mut f = File::create(&tmp).map_err(before)?;
+        f.write_all(&serde_json::to_vec(&self.state).map_err(|e| before(e.into()))?)
+            .map_err(before)?;
+        f.sync_all().map_err(before)?;
+        self.step("state-write").map_err(before)?;
+        fs::rename(&tmp, self.root.join("state.json")).map_err(before)?;
+        let after = |e| (e, true);
+        self.step("state-fsync-dir").map_err(after)?;
+        fsync_dir(&self.root).map_err(after)
+    }
+}
+
+/// The state of a data directory without `state.json` (a restore of the backed-up sealed days,
+/// or a first start): each stream's `hwm` and owner from the manifests, every manifest checked
+/// against its data file when that file is still there. Days without a manifest are left to
+/// recovery (truncated to zero).
+fn rebuild(root: &Path) -> io::Result<State> {
+    let mut state = State {
+        v: 1,
+        ..State::default()
+    };
+    let mut days = 0;
+    for node in read_dir_sorted(&root.join("archive"))? {
+        let Some(node_name) = node.file_name().and_then(|n| n.to_str()).map(String::from) else {
+            continue;
+        };
+        for file in read_dir_sorted(&node)? {
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let Some(day) = name.strip_suffix(".manifest.json") else {
+                continue;
+            };
+            let data = node.join(format!("{day}.ndjson.zst"));
+            let m = if data.exists() {
+                crate::seal::check_sealed(&data, &file)
+            } else {
+                crate::seal::read_manifest(&file)
+            }
+            .map_err(|e| io::Error::other(format!("{node_name}/{day}: {e}")))?;
+            for r in m.streams {
+                let s = state.streams.entry(r.stream).or_insert(StreamState {
+                    node: node_name.clone(),
+                    hwm: 0,
+                    last_receive_ns: 0,
+                    last_record_ns: 0,
+                });
+                s.hwm = s.hwm.max(r.last_seq);
+            }
+            days += 1;
+        }
+    }
+    if days > 0 {
+        crate::log::info(
+            "state-rebuilt",
+            serde_json::json!({"sealed_days": days, "streams": state.streams.len()}),
+        );
+    }
+    Ok(state)
 }
 
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {
@@ -556,6 +710,133 @@ pub mod tests {
             Reply::Ok { acked_seq: 5 }
         );
         assert_eq!(seqs(&s, "node-a"), vec![1, 2, 3, 4, 5]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// F02: an error before the state rename rolls back; after it, the data stays; a failed
+    /// rollback stops the writer until a restart recovers.
+    #[test]
+    fn commit_faults() {
+        let root = tempdir("faults");
+        let mut s = open(&root);
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 1, 3)),
+            Reply::Ok { acked_seq: 3 }
+        );
+        let key = s.state.files.keys().next().unwrap().clone();
+        let path = s.data_path(&key);
+        let len = |p: &Path| fs::metadata(p).unwrap().len();
+        let committed = len(&path);
+
+        s.faults = vec!["state-write"];
+        assert!(matches!(
+            s.push("node-a", &request("node-a", &STREAM, 4, 3)),
+            Reply::Insufficient(_)
+        ));
+        assert_eq!(len(&path), committed);
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 3);
+
+        // The state is renamed in, its directory fsync fails: data and new state are kept.
+        s.faults = vec!["state-fsync-dir"];
+        assert!(matches!(
+            s.push("node-a", &request("node-a", &STREAM, 4, 3)),
+            Reply::Insufficient(_)
+        ));
+        assert!(len(&path) > committed);
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 6);
+        drop(s);
+        let mut s = open(&root);
+        // The agent retries the batch it got no 200 for: acknowledged, stored once.
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 4, 3)),
+            Reply::Ok { acked_seq: 6 }
+        );
+        assert_eq!(seqs(&s, "node-a"), (1..=6).collect::<Vec<_>>());
+
+        // A failed rollback stops the writer: 503 until a restart.
+        let committed = len(&path);
+        s.faults = vec!["append", "rollback"];
+        assert!(matches!(
+            s.push("node-a", &request("node-a", &STREAM, 7, 3)),
+            Reply::Insufficient(_)
+        ));
+        assert!(s.broken().is_some());
+        s.faults.clear();
+        assert!(matches!(
+            s.push("node-a", &request("node-a", &STREAM, 7, 3)),
+            Reply::Unavailable(_)
+        ));
+        drop(s);
+        let mut s = open(&root);
+        assert_eq!(len(&path), committed);
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 7, 3)),
+            Reply::Ok { acked_seq: 9 }
+        );
+        assert_eq!(seqs(&s, "node-a"), (1..=9).collect::<Vec<_>>());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// F04: a committed file shorter than its committed length, or gone, refuses the start
+    /// and changes nothing. F11: one writer per data directory.
+    #[test]
+    fn lost_acknowledged_data_refuses_start() {
+        let root = tempdir("lost");
+        let mut s = open(&root);
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 1, 3)),
+            Reply::Ok { acked_seq: 3 }
+        );
+        let err = Store::open(&root, 0, Arc::new(Metrics::new()))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("another masu writer"), "{err}");
+        let path = s.data_path(s.state.files.keys().next().unwrap());
+        drop(s);
+        let full = fs::read(&path).unwrap();
+        fs::write(&path, &full[..full.len() - 5]).unwrap();
+        let err = Store::open(&root, 0, Arc::new(Metrics::new()))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("missing"), "{err}");
+        assert_eq!(fs::metadata(&path).unwrap().len(), full.len() as u64 - 5);
+        fs::remove_file(&path).unwrap();
+        let err = Store::open(&root, 0, Arc::new(Metrics::new()))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("gone"), "{err}");
+        fs::write(&path, &full).unwrap();
+        assert_eq!(seqs(&open(&root), "node-a"), vec![1, 2, 3]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// F10: `first_seq + i` past u64::MAX is a `seq-mismatch`, nothing stored, no panic.
+    #[test]
+    fn seq_overflow() {
+        let root = tempdir("overflow");
+        let mut s = open(&root);
+        let rec = |seq: u64| -> Bytes {
+            String::from_utf8(record("node-a", &STREAM, 1).to_vec())
+                .unwrap()
+                .replace("\"seq\":1,", &format!("\"seq\":{seq},"))
+                .into()
+        };
+        let mut req = request("node-a", &STREAM, u64::MAX, 0);
+        req.records = vec![rec(u64::MAX), rec(0), rec(1)];
+        assert_eq!(s.push("node-a", &req), rejected(Some(1), "seq-mismatch"));
+        req.records.truncate(1);
+        assert_eq!(
+            s.push("node-a", &req),
+            Reply::Ok {
+                acked_seq: u64::MAX
+            }
+        );
+        assert_eq!(
+            s.push("node-a", &req),
+            Reply::Ok {
+                acked_seq: u64::MAX
+            }
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

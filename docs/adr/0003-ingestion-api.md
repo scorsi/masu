@@ -36,6 +36,7 @@ Streams and sequence numbers as in nisshi's API: masu keeps per stream the highe
 | a record invalid: not a JSON object, envelope invalid under the published rules (storage-format, fixtures), a store field present (`recv_ts`), `node`/`stream`/`seq` not matching the request | nothing (whole batch) | 400, `PushRejected{record_index, reason}` of the first invalid record |
 | the request itself invalid: `node` ≠ authenticated node, malformed `stream_id`, `first_seq` = 0 | nothing | 400, `PushRejected{reason}` without index |
 | free space below `disk_reserve`, or a write error | rolls back to last commit | 507 |
+| the store clock puts the push on a sealed day, or the writer stopped after a failed rollback | nothing | 503 (ADR 0006 amendment) |
 | body too large | nothing | 413 |
 
 A batch is all or nothing. Delivery is at least once on the wire, exactly once on disk.

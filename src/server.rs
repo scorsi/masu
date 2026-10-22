@@ -231,6 +231,10 @@ async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
             crate::log::error("push-failed", &err, serde_json::json!({}));
             respond(StatusCode::INSUFFICIENT_STORAGE, "text/plain", Vec::new())
         }
+        Reply::Unavailable(err) => {
+            crate::log::error("push-failed", &err, serde_json::json!({}));
+            respond(StatusCode::SERVICE_UNAVAILABLE, "text/plain", Vec::new())
+        }
     }
 }
 
