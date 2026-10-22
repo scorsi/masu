@@ -476,7 +476,7 @@ fn rebuild(root: &Path) -> io::Result<State> {
         ..State::default()
     };
     let (mut sealed, mut open) = (0, 0);
-    for node in read_dir_sorted(&root.join("archive"))? {
+    for node in node_dirs(&root)? {
         let Some(node_name) = node.file_name().and_then(|n| n.to_str()).map(String::from) else {
             continue;
         };
@@ -647,6 +647,10 @@ pub mod tests {
             (1..=15).chain(21..=25).collect::<Vec<_>>()
         );
         let metrics = s.metrics.render(0);
+        assert!(
+            metrics.contains("masu_streams{source_node=\"node-a\"} 1\n"),
+            "{metrics}"
+        );
         assert!(metrics.contains("masu_seq_gaps_total 1\n"), "{metrics}");
         assert!(metrics.contains("masu_duplicate_records_total 15\n"));
         assert!(metrics.contains("masu_records_total{source_node=\"node-a\"} 20\n"));
@@ -973,7 +977,18 @@ pub mod tests {
         // Copied while the second frame was being written: half of it.
         let cut = complete as usize + (data.len() - complete as usize) / 2;
         fs::write(&path, &data[..cut]).unwrap();
+        // Backup artefacts: the marker at the root, strays under archive/.
+        fs::write(restored.join("LAST_RUN"), "2026-10-22\n").unwrap();
+        fs::write(restored.join("archive/LAST_RUN"), "x").unwrap();
+        fs::write(restored.join("archive/node-a/stray.tmp"), "x").unwrap();
+        fs::write(restored.join(format!("archive/{key}.ndjson.zst.tmp")), "x").unwrap();
         let mut s = open(&restored);
+        let metrics = s.metrics.render(0);
+        assert!(
+            metrics.contains("masu_streams{source_node=\"node-a\"} 1\n"),
+            "{metrics}"
+        );
+        assert_eq!(s.state.files.len(), 1);
         assert_eq!(s.state.files[&key], complete);
         assert_eq!(fs::metadata(&path).unwrap().len(), complete);
         assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 5);
