@@ -44,7 +44,9 @@ Enough to read or re-ingest masu's archive without masu's code. ADRs 0004 and 00
 | `error` | string | when not `up`: `timeout`, `connection-refused`, `http-<code>`, `series-limit`, `body-too-large` (the body, JSON-escaped as it appears in the record, is over 2 MiB), `skipped-spool-full`, `rejected:<store reason>`, or the error text |
 | `raw_b64` | string | only with `error:"rejected:…"`: the bytes of the record masu refused (hikyaku ADR 0005) |
 
-masu checks only the whole record: at most 4 MiB, as pushed (`raw_b64` is not part of it). The
+masu checks only the whole record. A stored record is at most 4 MiB (4 194 304 bytes). masu
+appends `,"recv_ts":"YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ"` (43 bytes) before the final `}`, so a
+pushed record is at most **4 194 261 bytes**: every pushed byte counts, `raw_b64` included. The
 agent (hikyaku ADR 0013) caps a scrape body at 2 MiB measured on its JSON-escaped form, the
 bytes that sit inside `"body":"…"`, so that a refused record still fits once base64-encoded. The record rules are published as fixtures in `fixtures/records/`
 (ADR 0009).
