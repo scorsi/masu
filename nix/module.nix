@@ -106,6 +106,12 @@ in
         assertion = cfg.listen != [ ];
         message = "services.masu.listen: at least one address.";
       }
+      {
+        assertion =
+          cfg.metrics.listen == null
+          || builtins.match "(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|\\[::1\\]):[0-9]+" cfg.metrics.listen != null;
+        message = "services.masu.metrics.listen: a loopback address and port (/metrics has no authentication).";
+      }
     ];
 
     environment.systemPackages = [ cfg.package ];
@@ -134,6 +140,8 @@ in
         StateDirectory = lib.mkIf (cfg.dataDir == "/var/lib/masu") "masu";
         ReadWritePaths = lib.mkIf (cfg.dataDir != "/var/lib/masu") [ cfg.dataDir ];
         MemoryMax = "128M";
+        # New archive files readable by the masu group at most, never by other accounts.
+        UMask = "0027";
         CapabilityBoundingSet = "";
         NoNewPrivileges = true;
         ProtectSystem = "strict";

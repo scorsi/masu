@@ -70,6 +70,16 @@ impl Config {
         if cfg.listen.is_empty() {
             return Err("listen: at least one address".into());
         }
+        // `/metrics` has no authentication: loopback only (metric convention).
+        if let Some(addr) = &cfg.listen_metrics
+            && !addr
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|a| a.ip().is_loopback())
+        {
+            return Err(format!(
+                "listen_metrics: `{addr}` is not a loopback address and port"
+            ));
+        }
         Ok(cfg)
     }
 }
@@ -110,5 +120,17 @@ key_file = "/run/credentials/masu.service/key"
         assert!(Config::parse(&OK.replace("node:node-a", "node:Node_A")).is_err());
         assert!(Config::parse(&OK.replace("b3f1c2d4e5b6a7f8091a2b3c4d5e6f70", "zz")).is_err());
         assert!(Config::parse(&OK.replace("[\"[::]:9472\"]", "[]")).is_err());
+        for addr in [
+            "0.0.0.0:9473",
+            "[::]:9473",
+            "192.0.2.1:9473",
+            "localhost:9473",
+        ] {
+            assert!(
+                Config::parse(&OK.replace("127.0.0.1:9473", addr)).is_err(),
+                "{addr}"
+            );
+        }
+        assert!(Config::parse(&OK.replace("127.0.0.1:9473", "[::1]:9473")).is_ok());
     }
 }
