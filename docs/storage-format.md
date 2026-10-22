@@ -20,7 +20,8 @@ Enough to read or re-ingest masu's archive without masu's code. ADRs 0004 and 00
 
 - A concatenation of complete zstd frames (RFC 8878), no dictionary, window ≤ 8 MiB.
 - Decompressed: NDJSON, UTF-8, one record per line, each line ends with `\n`.
-- The open day may end with a partial frame while a write is in progress.
+- The open day may end with a partial frame while a write is in progress (never past its
+  committed length in `state.json`, which always ends on a whole frame).
 
 ## Record
 
@@ -97,6 +98,8 @@ the day is then sealed (ADR 0006 amendment).
 Backups hold `FORMAT`, the sealed data files and their manifests, and, for each open day, the
 prefix of its data file up to its committed length in `state.json`, named
 `archive/<node>/<YYYY-MM-DD>.ndjson.zst.partial` in the backup tree. Never `state.json` itself.
+The prefix is copied through a `.tmp` file and a rename: a `.partial` is whole zstd frames,
+never a frame cut short.
 
 To restore: copy `FORMAT`, the sealed days and their manifests into an empty data directory,
 rename each `.partial` to `.ndjson.zst`, start masu. Leave out everything else the backup tree
@@ -108,9 +111,13 @@ stream's `hwm` and owner node before accepting pushes (ADR 0006 amendment):
 
 - from every manifest (largest `last_seq`), checked against its data file when present and
   against its path (`node`, `day`);
-- from every day file without a manifest: its complete zstd frames are scanned and the day
-  stays open at their length; a last frame cut by the end of the file is cut off, a frame that
-  does not decode stops the start.
+- from every day file without a manifest: its zstd frames are scanned and the day stays open
+  at the file's length. The file must end exactly on a complete frame: a frame that does not
+  decode, or an incomplete last frame, stops the start and nothing is changed. A frame cut by
+  the end of the file cannot be told from a corrupt block or frame size in an earlier frame
+  pointing past the end, and cutting it could drop valid frames after it; a sound `.partial`
+  never ends inside a frame. An operator who knows the tail is garbage cuts it by hand (e.g.
+  `head -c <bytes>`) after checking that `zstd -t` accepts the prefix.
 
 A stream found under two nodes stops the start.
 

@@ -987,8 +987,8 @@ pub mod tests {
         assert_eq!(Agent::from(&status).version, "é".repeat(32));
     }
 
-    /// Restore of an open day backed up as `.partial` (its committed prefix, maybe cut inside
-    /// a frame): the complete frames rebuild the streams and stay open; the cut tail goes.
+    /// Restore of an open day backed up as `.partial` (its committed prefix, whole frames): the
+    /// frames rebuild the streams and the day stays open at that length.
     #[test]
     fn restore_partial_open_day() {
         let root = tempdir("partial");
@@ -1011,9 +1011,8 @@ pub mod tests {
         fs::copy(root.join("FORMAT"), restored.join("FORMAT")).unwrap();
         let path = restored.join(format!("archive/{key}.ndjson.zst"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Copied while the second frame was being written: half of it.
-        let cut = complete as usize + (data.len() - complete as usize) / 2;
-        fs::write(&path, &data[..cut]).unwrap();
+        // Backed up when only the first frame was committed.
+        fs::write(&path, &data[..complete as usize]).unwrap();
         // Backup artefacts: the marker at the root, strays under archive/.
         fs::write(restored.join("LAST_RUN"), "2026-10-22\n").unwrap();
         fs::write(restored.join("archive/LAST_RUN"), "x").unwrap();
@@ -1076,8 +1075,8 @@ pub mod tests {
         (restored, s)
     }
 
-    /// Validation item 2: a frame that does not decode, with more bytes after it, refuses the
-    /// restore and truncates nothing; only a frame cut by the end of the file is dropped.
+    /// Validation item 2, review R2: a frame that does not decode, or an incomplete last frame
+    /// (cut, or a corrupt size pointing past the end), refuses the restore and truncates nothing.
     #[test]
     fn restore_refuses_a_corrupt_frame() {
         let (key, data, ends) = three_frames("corrupt");
@@ -1099,11 +1098,34 @@ pub mod tests {
         assert!(s.is_err());
         assert_eq!(fs::read(dir.join("archive").join(&file)).unwrap(), bad);
         let _ = fs::remove_dir_all(dir);
-        // Cut inside the third frame: the first two stay.
-        let (dir, s) = restore("cut", &[(file.clone(), data[..ends[2] - 3].to_vec())]);
+        // Review R2 (nisshi): the second frame's first block size raised to 64 KiB, past the
+        // end of the file, the third frame intact: an incomplete tail like a cut, refused.
+        let mut bad = data.clone();
+        let fhd = bad[ends[0] + 4];
+        let window = usize::from(fhd & 0x20 == 0);
+        let dict = [0, 1, 2, 4][usize::from(fhd & 3)];
+        let fcs = [usize::from(fhd & 0x20 != 0), 2, 4, 8][usize::from(fhd >> 6)];
+        let block = ends[0] + 5 + window + dict + fcs;
+        let header = u32::from_le_bytes([bad[block], bad[block + 1], bad[block + 2], 0]);
+        let header = (header & 7 | 65536 << 3).to_le_bytes();
+        bad[block..block + 3].copy_from_slice(&header[..3]);
+        let (dir, s) = restore("corrupt-size", &[(file.clone(), bad.clone())]);
+        let err = s.err().unwrap().to_string();
+        assert!(err.contains("incomplete frame at byte"), "{err}");
+        assert_eq!(fs::read(dir.join("archive").join(&file)).unwrap(), bad);
+        let _ = fs::remove_dir_all(dir);
+        // Cut inside the third frame: refused too, nothing truncated.
+        let cut = data[..ends[2] - 3].to_vec();
+        let (dir, s) = restore("cut", &[(file.clone(), cut.clone())]);
+        let err = s.err().unwrap().to_string();
+        assert!(err.contains("incomplete frame at byte"), "{err}");
+        assert_eq!(fs::read(dir.join("archive").join(&file)).unwrap(), cut);
+        let _ = fs::remove_dir_all(dir);
+        // Whole frames: accepted, open at the file's length.
+        let (dir, s) = restore("whole", &[(file.clone(), data.clone())]);
         let s = s.unwrap();
-        assert_eq!(s.state.files[&key], ends[1] as u64);
-        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 6);
+        assert_eq!(s.state.files[&key], ends[2] as u64);
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 9);
         drop(s);
         let _ = fs::remove_dir_all(dir);
     }

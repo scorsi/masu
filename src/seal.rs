@@ -192,10 +192,12 @@ pub fn scan_file(path: &Path) -> io::Result<Scan> {
     Ok(scan)
 }
 
-/// The complete frames of an unsealed day file (a restored `.partial`): their length and what
-/// they hold. Only a last frame cut short (the file ends inside it) is left out; a frame that
-/// does not decode, or a complete frame that does not hold records, is an error: nothing after
-/// it may be truncated away. The file is streamed, frame by frame, never read whole.
+/// An unsealed day file (a restored `.partial`): its length and what it holds. It must be
+/// whole zstd frames of records: a frame that does not decode, or an incomplete last frame, is
+/// an error and nothing is truncated. A cut frame cannot be told from a corrupt size in an
+/// earlier frame pointing past the end, which would cut valid frames after it (review R2);
+/// the backup copies whole frames, so a sound `.partial` never ends inside one. The file is
+/// streamed, frame by frame, never read whole.
 pub fn scan_open(path: &Path) -> io::Result<(u64, Scan)> {
     let len = fs::metadata(path)?.len();
     let mut file = BufReader::new(File::open(path)?);
@@ -208,8 +210,11 @@ pub fn scan_open(path: &Path) -> io::Result<(u64, Scan)> {
         });
         match frame {
             Ok(_) => end = file.stream_position()?,
-            // The decoder ran out of input inside the frame: the backup cut it.
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(io::Error::other(format!(
+                    "incomplete frame at byte {end} of {len}: the file must end on a complete zstd frame (docs/storage-format.md, Backup and restore)"
+                )));
+            }
             Err(e) => {
                 return Err(io::Error::other(format!(
                     "corrupt frame at byte {end} of {len}: {e}"
