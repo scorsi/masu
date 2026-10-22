@@ -94,7 +94,8 @@ pub struct Store {
     pub metrics: Arc<Metrics>,
     /// Day keys whose seal is running: no push may append to them (ADR 0006 amendment).
     pub sealing: BTreeSet<String>,
-    /// Why the writer stopped (a rollback failed): every push gets 503 until a restart recovers.
+    /// Why the writer stopped (a rollback failed, or `state.json` was renamed in without its
+    /// directory `fsync`): every push gets 503 until a restart recovers.
     broken: Option<String>,
     /// `FORMAT`, locked for the life of the store: one writer per data directory.
     _lock: File,
@@ -384,8 +385,8 @@ impl Store {
     /// Steps 1–2 of storage-format.md "Commit": append and fsync (with the directories of a new
     /// file), then `state.json` through a temporary file. An error before the new state is
     /// renamed in leaves the file at its committed length and the state unchanged; after the
-    /// rename the new state may already be on disk, so its data stays. A failed rollback stops
-    /// the writer.
+    /// rename the new state may already be on disk, so its data stays and the writer stops; a
+    /// failed rollback stops it too.
     fn commit(
         &mut self,
         key: &str,
@@ -430,13 +431,21 @@ impl Store {
                 e
             })
         })();
-        if result.is_err() && !published {
-            let rollback = self
-                .step("rollback")
-                .and_then(|()| file.set_len(committed.unwrap_or(0)))
-                .and_then(|()| file.sync_all());
-            if let Err(e) = rollback {
-                let why = format!("rollback of {key} failed: {e}");
+        if let Err(e) = &result {
+            let stop = if published {
+                // The new state may or may not be durable: answering a retry 200 now could
+                // acknowledge records an older state.json would cut; a restart re-syncs it.
+                Some(format!(
+                    "state.json of {key} renamed in but not synced: {e}"
+                ))
+            } else {
+                self.step("rollback")
+                    .and_then(|()| file.set_len(committed.unwrap_or(0)))
+                    .and_then(|()| file.sync_all())
+                    .err()
+                    .map(|e| format!("rollback of {key} failed: {e}"))
+            };
+            if let Some(why) = stop {
                 crate::log::error("writer-stopped", &why, serde_json::json!({}));
                 self.broken = Some(why);
             }
@@ -771,8 +780,8 @@ pub mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// F02: an error before the state rename rolls back; after it, the data stays; a failed
-    /// rollback stops the writer until a restart recovers.
+    /// F02: an error before the state rename rolls back; after it, the data stays and the
+    /// writer stops; a failed rollback stops it too, until a restart recovers.
     #[test]
     fn commit_faults() {
         let root = tempdir("faults");
@@ -802,9 +811,18 @@ pub mod tests {
         ));
         assert!(len(&path) > committed);
         assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 6);
+        // Its durability is unknown: the writer stops, the retry is not acknowledged, nor any
+        // other push, until a restart.
+        s.faults.clear();
+        for req in [
+            request("node-a", &STREAM, 4, 3),
+            request("node-a", &[0xbb; 16], 1, 1),
+        ] {
+            assert!(matches!(s.push("node-a", &req), Reply::Unavailable(_)));
+        }
         drop(s);
         let mut s = open(&root);
-        // The agent retries the batch it got no 200 for: acknowledged, stored once.
+        // After the restart the agent's retry is acknowledged, stored once.
         assert_eq!(
             s.push("node-a", &request("node-a", &STREAM, 4, 3)),
             Reply::Ok { acked_seq: 6 }

@@ -44,7 +44,8 @@ Streams and sequence numbers as in nisshi's API: masu keeps per stream the highe
 | the request itself invalid: `node` ≠ authenticated node, malformed `stream_id`, `first_seq` = 0 | nothing | 400, `PushRejected{reason}` without index |
 | the stream exists and belongs to another node (checked after the request-level 400s, before the records) | nothing | 403, `PushRejected{reason: "stream-owner"}` without index (ADR 0011) |
 | free space below `disk_reserve`, or a write error | rolls back to last commit | 507 |
-| the store clock puts the push on a sealed day, or the writer stopped after a failed rollback | nothing | 503 (ADR 0006 amendment) |
+| a write error after the new `state.json` is renamed in (its directory `fsync` failed): it may already be on disk | keeps the data and the new state (no rollback), stops the writer | 507 (ADR 0006 amendment) |
+| the store clock puts the push on a sealed day, or the writer stopped (a failed rollback, or the case above) | nothing | 503 (ADR 0006 amendment) |
 | body too large: over 8 MiB compressed, over 64 MiB decompressed, or more records than 64 MiB of valid records can hold (each is at least 154 bytes) | nothing | 413 |
 | body not received within 30 s | nothing | 408 |
 

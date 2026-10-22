@@ -43,6 +43,13 @@ Status: Accepted — 2026-10-22 (owner decision, after the code review of 2026-1
   the original (directory `fsync`), drop the file from `state.json`. A start that finds a day
   still in `state.json` with a manifest checks that the file, original or recompressed, holds
   exactly what the manifest records and takes the day as sealed; it never resizes it.
+- **The writer stops on an uncertain commit.** A commit error before the new `state.json` is
+  renamed in rolls back to the last commit (507). After the rename (its directory `fsync`
+  failed) the new state may already be durable, or not: masu keeps the data and that state,
+  answers 507 and then stops the writer, refusing every push, retries and duplicates included,
+  with 503 until a restart, whose recovery writes the state again durably. A retry is never
+  answered 200 on a state that may not survive a power loss. A failed rollback stops the
+  writer the same way.
 - **Recovery refuses lost data.** An open file shorter than its committed length, or missing,
   stops the start with an error instead of being padded or forgotten: its `hwm` would
   acknowledge records the store no longer has.
