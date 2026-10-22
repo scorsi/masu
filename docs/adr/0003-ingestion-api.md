@@ -3,6 +3,7 @@
 Status: Accepted — 2026-10-19
 
 Superseded in part by [0010](0010-forbidden-for-wrong-role.md) (403 for a valid token without the role).
+Amended by [0011](0011-stream-owner.md) (stream owner) and the 0006 amendment (503).
 
 ## Context
 
@@ -35,6 +36,7 @@ Streams and sequence numbers as in nisshi's API: masu keeps per stream the highe
 | no or bad credentials | nothing | 401 |
 | a record invalid: not a JSON object, envelope invalid under the published rules (storage-format, fixtures), a store field present (`recv_ts`), `node`/`stream`/`seq` not matching the request | nothing (whole batch) | 400, `PushRejected{record_index, reason}` of the first invalid record |
 | the request itself invalid: `node` ≠ authenticated node, malformed `stream_id`, `first_seq` = 0 | nothing | 400, `PushRejected{reason}` without index |
+| the stream exists and belongs to another node (checked after the request-level 400s, before the records) | nothing | 403, `PushRejected{reason: "stream-owner"}` without index (ADR 0011) |
 | free space below `disk_reserve`, or a write error | rolls back to last commit | 507 |
 | the store clock puts the push on a sealed day, or the writer stopped after a failed rollback | nothing | 503 (ADR 0006 amendment) |
 | body too large | nothing | 413 |

@@ -136,11 +136,15 @@ fn respond(status: StatusCode, content_type: &str, body: Vec<u8>) -> Response<Fu
 }
 
 fn rejected(record_index: Option<u32>, reason: &str) -> Response<Full> {
+    rejected_with(StatusCode::BAD_REQUEST, record_index, reason)
+}
+
+fn rejected_with(status: StatusCode, record_index: Option<u32>, reason: &str) -> Response<Full> {
     let body = PushRejected {
         record_index,
         reason: reason.into(),
     };
-    respond(StatusCode::BAD_REQUEST, PROTOBUF, body.encode_to_vec())
+    respond(status, PROTOBUF, body.encode_to_vec())
 }
 
 pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Full>, Infallible> {
@@ -226,6 +230,10 @@ async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
                 serde_json::json!({"record_index": record_index}),
             );
             rejected(record_index, &reason)
+        }
+        Reply::Forbidden(reason) => {
+            crate::log::warn("push-rejected", &reason, serde_json::json!({"code": 403}));
+            rejected_with(StatusCode::FORBIDDEN, None, &reason)
         }
         Reply::Insufficient(err) => {
             crate::log::error("push-failed", &err, serde_json::json!({}));

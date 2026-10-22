@@ -90,6 +90,7 @@ answered). Authentication comes first: 401 without a known token, 403 for a `rea
 | `node-mismatch` | request (no `record_index`) | `PushRequest.node` is not the authenticated node |
 | `stream-id-format` | request (no `record_index`) | `stream_id` is not 16 bytes |
 | `first-seq-zero` | request (no `record_index`) | `first_seq` is 0 |
+| `stream-owner` (**403**) | request (no `record_index`) | the stream exists and belongs to another node (ADR 0011) |
 | `node-mismatch` | record (`record_index`) | the record's `node` is not `PushRequest.node` |
 | `stream-mismatch` | record (`record_index`) | the record's `stream` is not the hex of `stream_id` |
 | `seq-mismatch` | record (`record_index`) | the record's `seq` is not `first_seq + i` |

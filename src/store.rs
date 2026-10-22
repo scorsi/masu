@@ -67,6 +67,8 @@ pub enum Reply {
         record_index: Option<u32>,
         reason: String,
     },
+    /// 403: the stream belongs to another node (ADR 0011); `PushRejected{reason}`, no index.
+    Forbidden(String),
     /// 507: free space below the reserve, or a write error (rolled back).
     Insufficient(String),
     /// 503: the store cannot take this push now (its clock puts it on a sealed day, or a failed
@@ -258,6 +260,15 @@ impl Store {
             return rejected(None, "first-seq-zero");
         }
         let stream = hex(&req.stream_id);
+        // A stream belongs to the node that first pushed it (ADR 0011).
+        if self
+            .state
+            .streams
+            .get(&stream)
+            .is_some_and(|s| s.node != node)
+        {
+            return Reply::Forbidden("stream-owner".into());
+        }
         let mut envelopes: Vec<Envelope> = Vec::with_capacity(req.records.len());
         for (i, bytes) in req.records.iter().enumerate() {
             let env = match record::check(bytes) {
@@ -836,6 +847,48 @@ pub mod tests {
             Reply::Ok {
                 acked_seq: u64::MAX
             }
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// ADR 0011: another node pushing an existing stream gets 403 `stream-owner`, before any
+    /// record check or deduplication, also after a restart; the owner's stream is untouched.
+    #[test]
+    fn stream_owner() {
+        let root = tempdir("owner");
+        let mut s = open(&root);
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 1, 10)),
+            Reply::Ok { acked_seq: 10 }
+        );
+        let forbidden = Reply::Forbidden("stream-owner".into());
+        let mut req = request("node-b", &STREAM, 11, 10);
+        assert_eq!(s.push("node-b", &req), forbidden);
+        // Before the record checks.
+        req.records[0] = Bytes::from_static(b"[]");
+        assert_eq!(s.push("node-b", &req), forbidden);
+        // After the request-level 400s.
+        assert_eq!(
+            s.push("node-b", &request("node-a", &STREAM, 11, 1)),
+            rejected(None, "node-mismatch")
+        );
+        drop(s);
+        let mut s = open(&root);
+        assert_eq!(
+            s.push("node-b", &request("node-b", &STREAM, 11, 10)),
+            forbidden
+        );
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 10);
+        assert!(lines(&s, "node-b").is_empty());
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 11, 10)),
+            Reply::Ok { acked_seq: 20 }
+        );
+        assert_eq!(seqs(&s, "node-a"), (1..=20).collect::<Vec<_>>());
+        // node-b's own stream is its own.
+        assert_eq!(
+            s.push("node-b", &request("node-b", &[0xcc; 16], 1, 1)),
+            Reply::Ok { acked_seq: 1 }
         );
         let _ = fs::remove_dir_all(root);
     }
