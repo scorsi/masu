@@ -6,8 +6,8 @@ description = "Metric store: raw scrape archive and the metric convention"
 
 # Direct dependencies are limited to ADR 0002.
 [dependencies]
-hyper = { version = "1", features = ["server", "http1", "http2", "client"] }
-hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+hyper = { version = "1", features = ["server", "http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 prost = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"

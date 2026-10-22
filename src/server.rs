@@ -9,7 +9,7 @@ use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use prost::Message;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -45,9 +45,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// hikyaku gives a request 30 s.
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
-/// A connection is closed after this, idle or not (an HTTP/2 connection has no idle timeout).
+/// A connection is closed after this, idle or not.
 const CONNECTION_LIFETIME: Duration = Duration::from_secs(600);
-const H2_STREAMS: u32 = 4;
 const PROTOBUF: &str = "application/x-protobuf";
 
 /// A one-chunk response body (no `http-body-util` in ADR 0002).
@@ -456,36 +455,25 @@ pub fn tls_config(cfg: &Config) -> Result<Arc<ServerConfig>, String> {
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .map_err(|e| e.to_string())?;
-    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    // HTTP/1.1 only: hyper bounds HTTP/1 headers in time, not an HTTP/2 preface or HEADERS
+    // (ADR 0003 amendment).
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(tls))
 }
 
-/// One ingestion connection, HTTP/2 when ALPN chose it, else HTTP/1.1 (no sniffing: the
-/// HTTP/1.1 header timeout then also closes a connection that never sends a byte), with few
-/// HTTP/2 streams and a bounded lifetime (HTTP/2 has no idle timeout).
-async fn serve_connection<I>(io: I, h2: bool, app: Arc<App>)
+/// One ingestion connection, HTTP/1.1 only: its header timeout also closes a connection that
+/// never sends a byte, or sends an HTTP/2 preface; its lifetime is bounded.
+async fn serve_connection<I>(io: I, app: Arc<App>)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-    let mut builder = if h2 {
-        builder.http2_only()
-    } else {
-        builder.http1_only()
-    };
-    builder
-        .http1()
+    let conn = hyper::server::conn::http1::Builder::new()
         .timer(TokioTimer::new())
-        .header_read_timeout(app.header_timeout);
-    builder
-        .http2()
-        .timer(TokioTimer::new())
-        .max_concurrent_streams(H2_STREAMS)
-        .keep_alive_interval(Duration::from_secs(30));
-    let conn = builder.serve_connection(
-        TokioIo::new(io),
-        service_fn(move |req| handle(app.clone(), req)),
-    );
+        .header_read_timeout(app.header_timeout)
+        .serve_connection(
+            TokioIo::new(io),
+            service_fn(move |req| handle(app.clone(), req)),
+        );
     let _ = tokio::time::timeout(CONNECTION_LIFETIME, conn).await;
 }
 
@@ -572,8 +560,7 @@ pub fn serve(cfg: Config) -> Result<(), String> {
                                 return;
                             }
                         };
-                        let h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
-                        serve_connection(stream, h2, app).await;
+                        serve_connection(stream, app).await;
                     });
                 }
             });
@@ -742,7 +729,7 @@ mod tests {
     }
 
     /// F08: unfinished headers close the connection, an unfinished body gets 408, both after
-    /// their timeout.
+    /// their timeout; HTTP/2 is offered nowhere.
     #[tokio::test]
     async fn slow_clients_time_out() {
         use std::io::Write;
@@ -763,7 +750,7 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 let (tcp, _) = listener.accept().await.unwrap();
-                tokio::spawn(serve_connection(tcp, false, app.clone()));
+                tokio::spawn(serve_connection(tcp, app.clone()));
             }
         });
         let exchange = |req: &'static [u8]| {
@@ -783,6 +770,12 @@ mod tests {
         assert!(took < Duration::from_secs(3), "headers: {took:?}");
         let (took, _) = exchange(b"").await.unwrap();
         assert!(took < Duration::from_secs(3), "idle: {took:?}");
+        // Validation item 8: HTTP/2 is not served; its preface alone does not hold a connection.
+        let (took, response) = exchange(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.unwrap();
+        assert!(took < Duration::from_secs(3), "h2 preface: {took:?}");
+        assert!(!response.starts_with("HTTP/1.1 2"), "{response}");
+        let (took, _) = exchange(b"PRI * HTTP/2.0\r\n").await.unwrap();
+        assert!(took < Duration::from_secs(3), "h2 preface cut: {took:?}");
         let (_, response) = exchange(
             b"POST /v1/push HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nContent-Encoding: zstd\r\nContent-Length: 100\r\n\r\nabc",
         )

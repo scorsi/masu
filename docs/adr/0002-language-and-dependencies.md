@@ -25,7 +25,7 @@ Rust, built with crane. Direct dependencies:
 | Crate | Why |
 |---|---|
 | `tokio` (`rt-multi-thread` limited to 2 workers, `net`, `fs`, `time`, `signal`, `macros`) | runtime |
-| `hyper` (`server`, `http1`, `http2`), `hyper-util` | HTTP server |
+| `hyper` (`server`, `http1`), `hyper-util` | HTTP server (HTTP/1.1 only, ADR 0003 amendment) |
 | `rustls` (`ring` provider), `tokio-rustls`, `rustls-pemfile` | TLS, no C toolchain for crypto |
 | `prost` | ingestion API |
 | `zstd` (vendored libzstd) | archive files; mature encoder with numeric levels |

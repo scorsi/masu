@@ -22,14 +22,21 @@ silently, nothing may appear twice. masu stores raw scrapes (0004), not samples.
 ## Decision
 
 `POST /v1/push`, body = `PushRequest` ([ingest.proto](../../proto/masu/v1/ingest.proto)),
-`Content-Type: application/x-protobuf`, `Content-Encoding: zstd`, HTTPS (HTTP/2 when
-negotiated). At most 8 MiB compressed, 64 MiB decompressed; zstd window at most 8 MiB (a larger
+`Content-Type: application/x-protobuf`, `Content-Encoding: zstd`, HTTPS, HTTP/1.1 only
+(amendment 2026-10-22, below). At most 8 MiB compressed, 64 MiB decompressed; zstd window at most 8 MiB (a larger
 one is `body-zstd`, amendment 2026-10-22).
 
 Resources (amendment 2026-10-22, review F07, F08): one push is processed at a time (body,
 decode, commit; the seal takes the same turn), others wait; at most 32 connections; 10 s for
-the TLS handshake and for the request headers, 30 s for the body, 10 minutes per connection,
-4 HTTP/2 streams per connection. `AgentStatus.version` is kept to 64 bytes.
+the TLS handshake and for the request headers, 30 s for the body, 10 minutes per connection.
+`AgentStatus.version` is kept to 64 bytes.
+
+HTTP/1.1 only (amendment 2026-10-22, validation of the review fixes): hyper bounds the time
+of HTTP/1 request headers, but has no such bound for an HTTP/2 preface or HEADERS frame, so
+an HTTP/2 connection could hold one of the 32 slots for its whole 10 minutes. ALPN offers
+`http/1.1` only; an HTTP/2 preface is answered as a malformed HTTP/1 request and the
+connection closed. hikyaku speaks HTTP/1.1. HTTP/2 comes back with a bound on its preface and
+headers.
 
 Streams and sequence numbers as in nisshi's API: masu keeps per stream the highest committed
 `seq` (`hwm`), committed atomically with the data.
