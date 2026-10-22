@@ -214,18 +214,25 @@ fn decode(compressed: Vec<u8>) -> Result<PushRequest, Option<&'static str>> {
     if decoded.is_err() {
         return Err(Some("body-zstd"));
     }
-    if raw.len() > MAX_DECOMPRESSED || count_records(&raw).is_some_and(|n| n > MAX_RECORDS) {
+    if raw.len() > MAX_DECOMPRESSED {
         return Err(None);
+    }
+    // prost is only reached once the records are counted: it allocates them all before it
+    // finds a broken tail.
+    match count_records(&raw) {
+        None => return Err(Some("body-protobuf")),
+        Some(n) if n > MAX_RECORDS => return Err(None),
+        Some(_) => {}
     }
     PushRequest::decode(Bytes::from(raw)).map_err(|_| Some("body-protobuf"))
 }
 
-/// `PushRequest.records` (field 4) in an encoded request; `None` when the wire format is
-/// broken (prost then answers `body-protobuf`).
+/// `PushRequest.records` (field 4) in an encoded request, counted up to `MAX_RECORDS + 1`;
+/// `None` when the wire format is broken.
 fn count_records(mut buf: &[u8]) -> Option<usize> {
     use prost::encoding::{DecodeContext, decode_key, skip_field};
     let mut n = 0;
-    while !buf.is_empty() {
+    while !buf.is_empty() && n <= MAX_RECORDS {
         let (tag, wire_type) = decode_key(&mut buf).ok()?;
         n += usize::from(tag == 4);
         skip_field(wire_type, tag, &mut buf, DecodeContext::default()).ok()?;
@@ -698,7 +705,7 @@ mod tests {
     }
 
     /// F07, F09: a window above 8 MiB and more records than 64 MiB of valid ones can hold are
-    /// refused before their memory is allocated.
+    /// refused before their memory is allocated, a broken wire format before prost runs.
     #[test]
     fn decode_bounds() {
         let mut enc = zstd::Encoder::new(Vec::new(), 1).unwrap();
@@ -712,6 +719,22 @@ mod tests {
         assert_eq!(
             decode(zstd::encode_all(&bomb[..], 3).unwrap()).err(),
             Some(None)
+        );
+        // Validation item 3: millions of empty records and an invalid last byte never reach
+        // prost: 413 once past MAX_RECORDS (counting stops there), else body-protobuf.
+        let mut bomb = [0x22u8, 0x00].repeat(3_000_000);
+        bomb.push(0xff);
+        assert_eq!(count_records(&bomb), Some(MAX_RECORDS + 1));
+        assert_eq!(
+            decode(zstd::encode_all(&bomb[..], 3).unwrap()).err(),
+            Some(None)
+        );
+        let mut short = [0x22u8, 0x00].repeat(MAX_RECORDS);
+        short.push(0xff);
+        assert_eq!(count_records(&short), None);
+        assert_eq!(
+            decode(zstd::encode_all(&short[..], 3).unwrap()).err(),
+            Some(Some("body-protobuf"))
         );
         let ok = [0x22u8, 0x00].repeat(MAX_RECORDS);
         let req = decode(zstd::encode_all(&ok[..], 3).unwrap()).unwrap();
