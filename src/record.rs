@@ -15,6 +15,9 @@ pub const RECV_TS_MEMBER_BYTES: usize = 43;
 pub const MIN_RECORD_BYTES: usize = 154;
 /// The largest record an agent may push.
 pub const MAX_PUSHED_BYTES: usize = MAX_STORED_BYTES - RECV_TS_MEMBER_BYTES;
+/// The deepest nesting of objects and arrays, the top-level object being level 1 (owner
+/// decision 2026-10-22, the same limit as nisshi and hikyaku).
+pub const MAX_DEPTH: usize = 64;
 
 /// The envelope fields the ingestion path matches against the request (ADR 0003).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +46,9 @@ pub fn check(record: &[u8]) -> Result<Envelope, String> {
         || record.iter().any(|&b| b == b'\n' || b == b'\r')
     {
         return Err("framing".into());
+    }
+    if too_deep(record) {
+        return Err("not-json".into());
     }
     let Ok(value) = serde_json::from_slice::<Value>(record) else {
         return Err("not-json".into());
@@ -86,6 +92,35 @@ pub fn check(record: &[u8]) -> Result<Envelope, String> {
         stream: stream.into(),
         seq,
     })
+}
+
+/// Whether objects and arrays nest deeper than `MAX_DEPTH`: a byte scan before any decoding,
+/// strings and their escapes skipped, no recursion. On invalid JSON the answer does not matter.
+fn too_deep(record: &[u8]) -> bool {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for &b in record {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return true;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// `missing-field:<name>` when absent, `<name>-format` when `get` refuses the value (wrong JSON
@@ -215,6 +250,17 @@ mod tests {
         ] {
             assert!(!is_timestamp(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn depth() {
+        let nested = |n: usize| format!("{{\"x\":{}{}}}", "[".repeat(n - 1), "]".repeat(n - 1));
+        assert!(!too_deep(nested(MAX_DEPTH).as_bytes()));
+        assert!(too_deep(nested(MAX_DEPTH + 1).as_bytes()));
+        // Brackets inside strings, after an escaped quote, do not nest.
+        let s = format!(r#"{{"x":"\"{}"}}"#, "[".repeat(100));
+        assert!(!too_deep(s.as_bytes()));
+        assert!(serde_json::from_str::<Value>(&s).is_ok());
     }
 
     #[test]

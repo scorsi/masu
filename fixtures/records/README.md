@@ -48,7 +48,7 @@ except `unexpected-field:raw_b64` (scrape records only).
 | 1 | `record-too-large` | more than 4 194 261 bytes |
 | 2 | `not-utf8` | not valid UTF-8 |
 | 3 | `framing` | the bytes do not start with `{` and end with `}`, or contain CR or LF (masu stores one record per line and inserts `recv_ts` before the last byte) |
-| 4 | `not-json` | not a single valid JSON value |
+| 4 | `not-json` | not a single valid JSON value, or objects and arrays nested deeper than 64 levels (below) |
 | 5 | `not-object` | valid JSON, but not an object |
 | 6 | `duplicate-field:<f>` | a top-level member name present twice; `<f>` is the first name repeated, after unescaping (`"\u0076"` is `v`) |
 | 7 | `reserved-field:recv_ts` | `recv_ts` present: a store field |
@@ -70,6 +70,11 @@ Field formats (`<f>-format`):
 `not-object` has no fixture: once `framing` holds, the bytes start with `{`, and a valid JSON
 value starting with `{` is an object. masu keeps the check; the reason exists for nisshi's
 vocabulary.
+
+Nesting: a record nested up to 64 levels deep (the top-level object is level 1, each object or
+array inside it one more) is valid JSON; level 65 is `not-json`, checked before decoding.
+Brackets inside strings do not nest. nisshi and hikyaku apply the same limit (owner decision
+2026-10-22).
 
 Duplicates are checked at the top level only: a nested object is not an envelope field.
 
