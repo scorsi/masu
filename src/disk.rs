@@ -34,6 +34,8 @@ unsafe extern "C" {
 }
 
 /// Bytes available to an unprivileged writer on `path`'s filesystem.
+// `f_bavail` is u64 on Linux but u32 on macOS: the conversion is only useless on Linux.
+#[allow(clippy::useless_conversion)]
 pub fn free_bytes(path: &Path) -> io::Result<u64> {
     let c = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::other("path with NUL"))?;
