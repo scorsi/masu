@@ -72,26 +72,31 @@ fn read_rows(root: &Path, q: &Query, out: &mut impl Write, max_rows: usize) -> i
             if q.service.as_deref().is_some_and(|s| s != service) {
                 continue;
             }
-            if rows.len() >= max_rows {
-                return Err(io::Error::other(format!(
-                    "more than {max_rows} rows: narrow the query (--from, --to, --service, --metric)"
-                )));
-            }
+            // The budget is checked before every row, each sample of a record included.
+            let mut emit = |row: String| {
+                if rows.len() >= max_rows {
+                    return Err(io::Error::other(format!(
+                        "more than {max_rows} rows: narrow the query (--from, --to, --service, --metric)"
+                    )));
+                }
+                rows.push((ts.to_string(), row));
+                Ok(())
+            };
             if q.raw {
-                rows.push((ts.into(), String::from_utf8_lossy(&line).trim_end().into()));
+                emit(String::from_utf8_lossy(&line).trim_end().into())?;
                 continue;
             }
             let head = format!("{ts} {} {service}", q.node);
             if !up {
-                rows.push((
-                    ts.into(),
-                    format!("{head} !{}", v["error"].as_str().unwrap_or("error")),
-                ));
+                emit(format!(
+                    "{head} !{}",
+                    v["error"].as_str().unwrap_or("error")
+                ))?;
                 continue;
             }
             let format = Format::from_content_type(v["content_type"].as_str().unwrap_or(""));
             match exposition::parse(v["body"].as_str().unwrap_or(""), format) {
-                Err(e) => rows.push((ts.into(), format!("{head} !parse-error:{e}"))),
+                Err(e) => emit(format!("{head} !parse-error:{e}"))?,
                 Ok(families) => {
                     for s in families.iter().flat_map(|f| &f.samples) {
                         if q.metric.as_deref().is_some_and(|m| !s.name.starts_with(m)) {
@@ -99,10 +104,7 @@ fn read_rows(root: &Path, q: &Query, out: &mut impl Write, max_rows: usize) -> i
                         }
                         // shortcut: a sample's own timestamp is ignored, the record's ts is printed;
                         // revisit when the engine re-ingests the archive.
-                        rows.push((
-                            ts.into(),
-                            format!("{head} {} {}", series(&s.name, &s.labels), s.value),
-                        ));
+                        emit(format!("{head} {} {}", series(&s.name, &s.labels), s.value))?;
                     }
                 }
             }
@@ -416,6 +418,28 @@ mod tests {
         .unwrap();
         assert!(read_rows(&root, &query("node-a"), &mut Vec::new(), 2).is_ok());
         assert!(read_rows(&root, &query("node-a"), &mut Vec::new(), 1).is_err());
+        // Validation item 6: a record of three samples is three rows; a record with no matching
+        // sample adds none.
+        let three = rec(1).replace(
+            r#"annai_queries_total{proto=\"udp\"} 10\n"#,
+            r#"annai_queries_total{proto=\"udp\"} 10\nannai_queries_total{proto=\"tcp\"} 1\nannai_queries_total{proto=\"dot\"} 2\n"#,
+        );
+        let other = rec(2).replace("annai_queries_total", "annai_other_total");
+        fs::write(
+            &data,
+            zstd::encode_all(format!("{three}\n{other}\n").as_bytes(), 3).unwrap(),
+        )
+        .unwrap();
+        let samples = Query {
+            raw: false,
+            metric: Some("annai_queries_total".into()),
+            ..query("node-a")
+        };
+        let mut out = Vec::new();
+        read_rows(&root, &samples, &mut out, 3).unwrap();
+        assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 3);
+        let err = read_rows(&root, &samples, &mut Vec::new(), 2).unwrap_err();
+        assert!(err.to_string().contains("more than 2 rows"), "{err}");
         let _ = fs::remove_dir_all(root);
     }
 
