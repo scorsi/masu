@@ -27,7 +27,11 @@ silently, nothing may appear twice. masu stores raw scrapes (0004), not samples.
 one is `body-zstd`, amendment 2026-10-22).
 
 Resources (amendment 2026-10-22, review F07, F08): one push is processed at a time (body,
-decode, commit; the seal takes the same turn), others wait; at most 32 connections; 10 s for
+decode, commit; the seal takes the same turn), others wait at most 25 s (under hikyaku's 30 s
+request timeout) and then get **503** with nothing read or stored: the agent backs off and
+retries (amendment 2026-10-22; a long seal or a stuck `fsync` holds the slot, and the
+server's deadlines do not end a waiting handler). The seal itself waits its turn without a
+deadline. At most 32 connections; 10 s for
 the TLS handshake and for the request headers, 30 s for the body, 10 minutes per connection.
 `AgentStatus.version` is kept to 64 bytes.
 
@@ -55,6 +59,7 @@ Streams and sequence numbers as in nisshi's API: masu keeps per stream the highe
 | the store clock puts the push on a sealed day, or the writer stopped (a failed rollback, or the case above) | nothing | 503 (ADR 0006 amendment) |
 | body too large: over 8 MiB compressed, over 64 MiB decompressed, or more records than 64 MiB of valid records can hold (each is at least 154 bytes) | nothing | 413 |
 | body not received within 30 s | nothing | 408 |
+| the push slot not free within 25 s (amendment 2026-10-22) | nothing, body not read | 503 |
 
 A batch is all or nothing. Delivery is at least once on the wire, exactly once on disk.
 Records are stored as received, plus `recv_ts` (commit time, same format as `ts`) appended as

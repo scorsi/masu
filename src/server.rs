@@ -43,6 +43,9 @@ const WORK_PERMITS: usize = 1;
 const MAX_CONNECTIONS: usize = 32;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// A push waits at most this for the work slot (a long seal or a stuck fsync holds it), then
+/// gets 503: under hikyaku's 30 s request timeout, so the agent reads it and backs off.
+const ADMIT_TIMEOUT: Duration = Duration::from_secs(25);
 /// hikyaku gives a request 30 s.
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 /// A connection is closed after this, idle or not.
@@ -102,6 +105,7 @@ pub struct App {
     pub work: Arc<Semaphore>,
     pub header_timeout: Duration,
     pub body_timeout: Duration,
+    pub admit_timeout: Duration,
 }
 
 impl App {
@@ -126,6 +130,7 @@ impl App {
             work: Arc::new(Semaphore::new(WORK_PERMITS)),
             header_timeout: HEADER_TIMEOUT,
             body_timeout: BODY_TIMEOUT,
+            admit_timeout: ADMIT_TIMEOUT,
         }
     }
 
@@ -253,7 +258,13 @@ async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
     }
     // The permit goes to the blocking task: it is held until the commit ends, even if this
     // connection goes away.
-    let permit = app.work.clone().acquire_owned().await.unwrap();
+    // Nothing is read before the permit: a push refused here holds no body.
+    let Ok(permit) = tokio::time::timeout(app.admit_timeout, app.work.clone().acquire_owned())
+        .await
+        .map(Result::unwrap)
+    else {
+        return respond(StatusCode::SERVICE_UNAVAILABLE, "text/plain", Vec::new());
+    };
     let compressed =
         match tokio::time::timeout(app.body_timeout, read_body(req.into_body(), MAX_COMPRESSED))
             .await
@@ -595,7 +606,8 @@ pub fn serve(cfg: Config) -> Result<(), String> {
         tokio::spawn(async move {
             loop {
                 let store = store.clone();
-                // The seal takes the push permit: its memory never adds to a push's.
+                // The seal takes the push permit: its memory never adds to a push's. It waits
+                // its turn, without a deadline: the semaphore is FIFO, timed-out pushes leave the queue.
                 let permit = work.clone().acquire_owned().await.unwrap();
                 let _ = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
@@ -782,6 +794,66 @@ mod tests {
         .await
         .unwrap();
         assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Push admission: while the slot is held a push gets 503 after `admit_timeout`; one that
+    /// arrives inside the deadline waits and gets 200 once the slot is freed.
+    #[tokio::test]
+    async fn push_admission_deadline() {
+        use std::io::Write;
+        let root = crate::store::tests::tempdir("admit");
+        let store = Arc::new(Mutex::new(crate::store::tests::open(&root)));
+        let hash = crate::store::hex(&Sha256::digest(b"t"));
+        let cfg = Config::parse(&format!(
+            "listen = [\"x\"]\ndata_dir = \"{}\"\n[tls]\ncert_file = \"c\"\nkey_file = \"k\"\n[tokens]\n\"{hash}\" = \"node:node-a\"\n",
+            root.display()
+        ))
+        .unwrap();
+        let mut app = App::new(store, Arc::new(Metrics::new()), &cfg);
+        app.admit_timeout = Duration::from_millis(600);
+        let app = Arc::new(app);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = app.clone();
+        tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                tokio::spawn(serve_connection(tcp, served.clone()));
+            }
+        });
+        let req = PushRequest {
+            node: "node-a".into(),
+            stream_id: vec![1; 16].into(),
+            first_seq: 1,
+            ..Default::default()
+        };
+        let body = zstd::encode_all(&req.encode_to_vec()[..], 0).unwrap();
+        let push = move || {
+            let body = body.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut c = std::net::TcpStream::connect(addr).unwrap();
+                c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let head = format!(
+                    "POST /v1/push HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nContent-Encoding: zstd\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                c.write_all(head.as_bytes()).unwrap();
+                c.write_all(&body).unwrap();
+                let mut out = Vec::new();
+                let _ = c.read_to_end(&mut out);
+                String::from_utf8_lossy(&out).into_owned()
+            })
+        };
+        let slot = app.work.clone().acquire_owned().await.unwrap();
+        let refused = push().await.unwrap();
+        assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+        let waiting = push();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(!waiting.is_finished(), "admitted while the slot is held");
+        drop(slot);
+        let admitted = waiting.await.unwrap();
+        assert!(admitted.starts_with("HTTP/1.1 200"), "{admitted}");
         let _ = std::fs::remove_dir_all(root);
     }
 }
