@@ -124,6 +124,7 @@ masu_seq_gaps_total
 masu_push_requests_total{code="200"}
 masu_disk_free_bytes
 masu_seals_total{result="ok|error"}
+masu_streams{source_node="node-a"}
 nisshi_records_total{source_node="node-a"}
 nisshi_…                                   (nisshi ADR 0010)
 ```

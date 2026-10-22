@@ -36,6 +36,7 @@ const FAMILIES: &[(&str, &str, &str)] = &[
         "counter",
         "Day files sealed, by result.",
     ),
+    ("masu_streams", "gauge", "Known streams, by owning node."),
 ];
 
 #[derive(Default)]
@@ -63,6 +64,22 @@ impl Metrics {
     }
 
     pub fn add(&self, name: &str, labels: &[(&str, &str)], n: u64) {
+        let (key, slot) = self.key(name, labels);
+        *self
+            .counters
+            .lock()
+            .unwrap()
+            .entry((slot, key))
+            .or_insert(0) += n;
+    }
+
+    /// Gauge: replaces the value.
+    pub fn set(&self, name: &str, labels: &[(&str, &str)], v: u64) {
+        let (key, slot) = self.key(name, labels);
+        self.counters.lock().unwrap().insert((slot, key), v);
+    }
+
+    fn key(&self, name: &str, labels: &[(&str, &str)]) -> (String, usize) {
         let family = FAMILIES
             .iter()
             .position(|f| f.0 == name)
@@ -77,12 +94,7 @@ impl Metrics {
         } else {
             format!("{{{}}}", labels.join(","))
         };
-        *self
-            .counters
-            .lock()
-            .unwrap()
-            .entry((family, key))
-            .or_insert(0) += n;
+        (key, family)
     }
 
     /// Prometheus text 0.0.4.
@@ -127,6 +139,10 @@ mod tests {
         assert!(text.contains("masu_push_requests_total{code=\"200\"} 1\n"));
         assert!(text.contains("masu_seq_gaps_total 0\n"));
         assert!(text.contains("masu_disk_free_bytes 42\n"));
+        m.set("masu_streams", &[("source_node", "node-a")], 3);
+        m.set("masu_streams", &[("source_node", "node-a")], 2);
+        let text = m.render(42);
+        assert!(text.contains("masu_streams{source_node=\"node-a\"} 2\n"));
         let violations = convention::validate(text.as_bytes(), Format::Prometheus);
         assert!(violations.is_empty(), "{violations:?}");
     }

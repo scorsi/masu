@@ -151,7 +151,20 @@ impl Store {
             faults: Vec::new(),
         };
         store.recover()?;
+        store.publish_streams();
         Ok(store)
+    }
+
+    /// `masu_streams{source_node}`: no cap on streams, the count is the signal (owner 2026-10-22).
+    fn publish_streams(&self) {
+        let mut per_node: BTreeMap<&str, u64> = BTreeMap::new();
+        for s in self.state.streams.values() {
+            *per_node.entry(&s.node).or_default() += 1;
+        }
+        for (node, n) in per_node {
+            self.metrics
+                .set("masu_streams", &[("source_node", node)], n);
+        }
     }
 
     /// Every open file back to its committed length; a day file that is neither open nor
@@ -160,7 +173,7 @@ impl Store {
     /// records are gone and the `hwm` would acknowledge them again.
     fn recover(&mut self) -> io::Result<()> {
         let mut seen = Vec::new();
-        for node in read_dir_sorted(&self.root.join("archive"))? {
+        for node in node_dirs(&self.root)? {
             let Some(node_name) = node.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
@@ -352,6 +365,7 @@ impl Store {
         }) {
             return Reply::Insufficient(format!("commit {key}: {e}"));
         }
+        self.publish_streams();
         self.metrics
             .add("masu_records_total", &[("source_node", node)], stored);
         if req.first_seq > hwm + 1 {
@@ -519,6 +533,13 @@ fn rebuild(root: &Path) -> io::Result<State> {
 
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
+}
+
+/// The `archive/<node>` directories; a stray file there (backup marker, `*.tmp`) is not a node.
+pub fn node_dirs(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut v = read_dir_sorted(&root.join("archive"))?;
+    v.retain(|p| p.is_dir());
+    Ok(v)
 }
 
 pub fn read_dir_sorted(dir: &Path) -> io::Result<Vec<PathBuf>> {
