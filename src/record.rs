@@ -11,6 +11,8 @@ use std::fmt;
 pub const MAX_STORED_BYTES: usize = 4 * 1024 * 1024;
 /// `,"recv_ts":"2026-10-19T08:14:00.391022117Z"`, inserted by masu before the final `}`.
 pub const RECV_TS_MEMBER_BYTES: usize = 43;
+/// The smallest valid record: every required member, shortest values (test `smallest_record`).
+pub const MIN_RECORD_BYTES: usize = 154;
 /// The largest record an agent may push.
 pub const MAX_PUSHED_BYTES: usize = MAX_STORED_BYTES - RECV_TS_MEMBER_BYTES;
 
@@ -219,5 +221,15 @@ mod tests {
     fn recv_ts_member_size() {
         let member = format!(",\"recv_ts\":\"{}\"", "2026-10-19T08:14:00.391022117Z");
         assert_eq!(member.len(), RECV_TS_MEMBER_BYTES);
+    }
+
+    #[test]
+    fn smallest_record() {
+        let r = format!(
+            r#"{{"v":1,"ts":"2026-10-19T08:14:00.000213904Z","node":"a","service":"","stream":"{}","seq":0,"up":false,"dur_us":0,"error":""}}"#,
+            "0".repeat(32)
+        );
+        assert!(check(r.as_bytes()).is_ok());
+        assert_eq!(r.len(), MIN_RECORD_BYTES);
     }
 }

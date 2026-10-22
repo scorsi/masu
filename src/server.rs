@@ -9,7 +9,7 @@ use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use prost::Message;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -21,13 +21,33 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 
 /// ADR 0003: at most 8 MiB compressed, 64 MiB decompressed.
 pub const MAX_COMPRESSED: usize = 8 << 20;
 pub const MAX_DECOMPRESSED: usize = 64 << 20;
+/// More records than 64 MiB of valid ones can hold (each at least `MIN_RECORD_BYTES` plus 3
+/// bytes of protobuf framing) is a body too large (413), refused before prost allocates them.
+const MAX_RECORDS: usize = MAX_DECOMPRESSED / (crate::record::MIN_RECORD_BYTES + 3);
+/// Transport frames: zstd window at most 8 MiB, refused before the decoder allocates it.
+const WINDOW_LOG_MAX: u32 = 23;
+/// Pushes in flight (body, decode, commit), the seal included: one keeps the worst case
+/// (8 MiB body, 64 MiB decoded, the records' slices, the encoder) inside `MemoryMax=128M`.
+/// Others wait for it, holding no body.
+const WORK_PERMITS: usize = 1;
+/// Connections at once over every listener; more wait in the kernel's backlog.
+const MAX_CONNECTIONS: usize = 32;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// hikyaku gives a request 30 s.
+const BODY_TIMEOUT: Duration = Duration::from_secs(30);
+/// A connection is closed after this, idle or not (an HTTP/2 connection has no idle timeout).
+const CONNECTION_LIFETIME: Duration = Duration::from_secs(600);
+const H2_STREAMS: u32 = 4;
 const PROTOBUF: &str = "application/x-protobuf";
 
 /// A one-chunk response body (no `http-body-util` in ADR 0002).
@@ -79,6 +99,10 @@ pub struct App {
     pub root: PathBuf,
     pub disk_reserve: u64,
     tokens: Vec<([u8; 32], Identity)>,
+    /// `WORK_PERMITS`: pushes and the seal.
+    pub work: Arc<Semaphore>,
+    pub header_timeout: Duration,
+    pub body_timeout: Duration,
 }
 
 impl App {
@@ -100,6 +124,9 @@ impl App {
             root: cfg.data_dir.clone(),
             disk_reserve: cfg.disk_reserve,
             tokens,
+            work: Arc::new(Semaphore::new(WORK_PERMITS)),
+            header_timeout: HEADER_TIMEOUT,
+            body_timeout: BODY_TIMEOUT,
         }
     }
 
@@ -155,7 +182,7 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Fu
                 .inc("masu_push_requests_total", &[("code", r.status().as_str())]);
             r
         }
-        (&Method::GET, "/v1/status") => status(&app, &req),
+        (&Method::GET, "/v1/status") => status(&app, &req).await,
         _ => respond(StatusCode::NOT_FOUND, "text/plain", Vec::new()),
     };
     Ok(response)
@@ -176,18 +203,34 @@ fn is_zstd(content_encoding: Option<&str>) -> bool {
 }
 
 /// The transport checks after `content-encoding`, in order: `body-zstd`, then `body-protobuf`
-/// (fixtures/records/README.md); `Err(None)` past 64 MiB decompressed (413).
-fn decode(compressed: &[u8]) -> Result<PushRequest, Option<&'static str>> {
+/// (fixtures/records/README.md); `Err(None)` past 64 MiB decompressed or `MAX_RECORDS` (413).
+fn decode(compressed: Vec<u8>) -> Result<PushRequest, Option<&'static str>> {
     let mut raw = Vec::new();
-    let decoded = zstd::Decoder::new(compressed)
-        .and_then(|d| d.take(MAX_DECOMPRESSED as u64 + 1).read_to_end(&mut raw));
+    let decoded = zstd::Decoder::new(&compressed[..]).and_then(|mut d| {
+        d.window_log_max(WINDOW_LOG_MAX)?;
+        d.take(MAX_DECOMPRESSED as u64 + 1).read_to_end(&mut raw)
+    });
+    drop(compressed);
     if decoded.is_err() {
         return Err(Some("body-zstd"));
     }
-    if raw.len() > MAX_DECOMPRESSED {
+    if raw.len() > MAX_DECOMPRESSED || count_records(&raw).is_some_and(|n| n > MAX_RECORDS) {
         return Err(None);
     }
     PushRequest::decode(Bytes::from(raw)).map_err(|_| Some("body-protobuf"))
+}
+
+/// `PushRequest.records` (field 4) in an encoded request; `None` when the wire format is
+/// broken (prost then answers `body-protobuf`).
+fn count_records(mut buf: &[u8]) -> Option<usize> {
+    use prost::encoding::{DecodeContext, decode_key, skip_field};
+    let mut n = 0;
+    while !buf.is_empty() {
+        let (tag, wire_type) = decode_key(&mut buf).ok()?;
+        n += usize::from(tag == 4);
+        skip_field(wire_type, tag, &mut buf, DecodeContext::default()).ok()?;
+    }
+    Some(n)
 }
 
 async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
@@ -202,18 +245,29 @@ async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
     if !is_zstd(header(CONTENT_ENCODING)) {
         return rejected(None, "content-encoding");
     }
-    let Ok(compressed) = read_body(req.into_body(), MAX_COMPRESSED).await else {
-        return respond(StatusCode::PAYLOAD_TOO_LARGE, "text/plain", Vec::new());
-    };
-    let request = match decode(&compressed) {
-        Ok(r) => r,
+    // The permit goes to the blocking task: it is held until the commit ends, even if this
+    // connection goes away.
+    let permit = app.work.clone().acquire_owned().await.unwrap();
+    let compressed =
+        match tokio::time::timeout(app.body_timeout, read_body(req.into_body(), MAX_COMPRESSED))
+            .await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(())) => return respond(StatusCode::PAYLOAD_TOO_LARGE, "text/plain", Vec::new()),
+            Err(_) => return respond(StatusCode::REQUEST_TIMEOUT, "text/plain", Vec::new()),
+        };
+    let store = app.store.clone();
+    let decoded = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        decode(compressed).map(|request| store.lock().unwrap().push(&node, &request))
+    })
+    .await
+    .unwrap_or_else(|e| Ok(Reply::Insufficient(format!("push task: {e}"))));
+    let reply = match decoded {
+        Ok(reply) => reply,
         Err(Some(reason)) => return rejected(None, reason),
         Err(None) => return respond(StatusCode::PAYLOAD_TOO_LARGE, "text/plain", Vec::new()),
     };
-    let store = app.store.clone();
-    let reply = tokio::task::spawn_blocking(move || store.lock().unwrap().push(&node, &request))
-        .await
-        .unwrap_or_else(|e| Reply::Insufficient(format!("push task: {e}")));
     match reply {
         Reply::Ok { acked_seq } => respond(
             StatusCode::OK,
@@ -277,16 +331,27 @@ struct AgentJson {
     oldest_unacked_ns: String,
 }
 
-fn status(app: &Arc<App>, req: &Request<Incoming>) -> Response<Full> {
+async fn status(app: &Arc<App>, req: &Request<Incoming>) -> Response<Full> {
     match app.identity(req) {
         Some(Identity::Reader) => {}
         id => return refuse("/v1/status", id),
     }
-    let s = app.store.lock().unwrap();
+    // Off the async workers: the store lock may wait for a commit's fsync.
+    let app = app.clone();
+    match tokio::task::spawn_blocking(move || status_body(&app)).await {
+        Ok(body) => respond(StatusCode::OK, "application/json", body),
+        Err(_) => respond(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", Vec::new()),
+    }
+}
+
+/// The state copied under the lock; disk and serialisation after it is released.
+fn status_body(app: &App) -> Vec<u8> {
+    let (streams, agents) = {
+        let s = app.store.lock().unwrap();
+        (s.state.streams.clone(), s.state.agents.clone())
+    };
     let body = StatusJson {
-        streams: s
-            .state
-            .streams
+        streams: streams
             .iter()
             .map(|(hex, st)| StreamJson {
                 node: st.node.clone(),
@@ -296,9 +361,7 @@ fn status(app: &Arc<App>, req: &Request<Incoming>) -> Response<Full> {
                 last_record_ns: st.last_record_ns.to_string(),
             })
             .collect(),
-        agents: s
-            .state
-            .agents
+        agents: agents
             .iter()
             .map(|(node, a)| {
                 (
@@ -313,14 +376,10 @@ fn status(app: &Arc<App>, req: &Request<Incoming>) -> Response<Full> {
                 )
             })
             .collect(),
-        disk_free_bytes: s.disk_free().to_string(),
+        disk_free_bytes: crate::disk::free_bytes(&app.root).unwrap_or(0).to_string(),
         disk_reserve_bytes: app.disk_reserve.to_string(),
     };
-    respond(
-        StatusCode::OK,
-        "application/json",
-        serde_json::to_vec(&body).unwrap(),
-    )
+    serde_json::to_vec(&body).unwrap()
 }
 
 fn unhex(hex: &str) -> Vec<u8> {
@@ -355,7 +414,12 @@ pub async fn metrics_handle(
 ) -> Result<Response<Full>, Infallible> {
     Ok(match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") => {
-            let free = crate::disk::free_bytes(&app.root).unwrap_or(0);
+            let root = app.root.clone();
+            let free = tokio::task::spawn_blocking(move || crate::disk::free_bytes(&root))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(0);
             respond(
                 StatusCode::OK,
                 "text/plain; version=0.0.4; charset=utf-8",
@@ -387,6 +451,35 @@ pub fn tls_config(cfg: &Config) -> Result<Arc<ServerConfig>, String> {
             .map_err(|e| e.to_string())?;
     tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(tls))
+}
+
+/// One ingestion connection, HTTP/2 when ALPN chose it, else HTTP/1.1 (no sniffing: the
+/// HTTP/1.1 header timeout then also closes a connection that never sends a byte), with few
+/// HTTP/2 streams and a bounded lifetime (HTTP/2 has no idle timeout).
+async fn serve_connection<I>(io: I, h2: bool, app: Arc<App>)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    let mut builder = if h2 {
+        builder.http2_only()
+    } else {
+        builder.http1_only()
+    };
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(app.header_timeout);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(H2_STREAMS)
+        .keep_alive_interval(Duration::from_secs(30));
+    let conn = builder.serve_connection(
+        TokioIo::new(io),
+        service_fn(move |req| handle(app.clone(), req)),
+    );
+    let _ = tokio::time::timeout(CONNECTION_LIFETIME, conn).await;
 }
 
 /// `sd_notify(READY=1)` by hand over `NOTIFY_SOCKET` (`Type=notify`).
@@ -439,22 +532,27 @@ pub fn serve(cfg: Config) -> Result<(), String> {
         let store = Arc::new(Mutex::new(store));
         let tls = TlsAcceptor::from(tls_config(&cfg)?);
         let app = Arc::new(App::new(store.clone(), metrics, &cfg));
+        let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
         for addr in &cfg.listen {
             let listener = TcpListener::bind(addr)
                 .await
                 .map_err(|e| format!("listen {addr}: {e}"))?;
-            let (tls, app) = (tls.clone(), app.clone());
+            let (tls, app, connections) = (tls.clone(), app.clone(), connections.clone());
             tokio::spawn(async move {
                 loop {
+                    let permit = connections.clone().acquire_owned().await.unwrap();
                     let Ok((tcp, _)) = listener.accept().await else {
                         continue;
                     };
                     let (tls, app) = (tls.clone(), app.clone());
                     tokio::spawn(async move {
-                        let stream = match tls.accept(tcp).await {
-                            Ok(s) => s,
-                            Err(e) => {
+                        let _permit = permit;
+                        let stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, tls.accept(tcp))
+                            .await
+                        {
+                            Ok(Ok(s)) => s,
+                            Ok(Err(e)) => {
                                 crate::log::warn(
                                     "tls-handshake",
                                     &e.to_string(),
@@ -462,13 +560,13 @@ pub fn serve(cfg: Config) -> Result<(), String> {
                                 );
                                 return;
                             }
+                            Err(_) => {
+                                crate::log::warn("tls-handshake", "timeout", serde_json::json!({}));
+                                return;
+                            }
                         };
-                        let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                            .serve_connection(
-                                TokioIo::new(stream),
-                                service_fn(move |req| handle(app.clone(), req)),
-                            )
-                            .await;
+                        let h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
+                        serve_connection(stream, h2, app).await;
                     });
                 }
             });
@@ -486,6 +584,8 @@ pub fn serve(cfg: Config) -> Result<(), String> {
                     let app = app.clone();
                     tokio::spawn(async move {
                         let _ = hyper::server::conn::http1::Builder::new()
+                            .timer(TokioTimer::new())
+                            .header_read_timeout(HEADER_TIMEOUT)
                             .serve_connection(
                                 TokioIo::new(tcp),
                                 service_fn(move |req| metrics_handle(app.clone(), req)),
@@ -497,12 +597,17 @@ pub fn serve(cfg: Config) -> Result<(), String> {
         }
 
         let retention_days = cfg.retention_days;
+        let work = app.work.clone();
         tokio::spawn(async move {
             loop {
                 let store = store.clone();
-                let _ =
-                    tokio::task::spawn_blocking(move || crate::seal::run(&store, retention_days))
-                        .await;
+                // The seal takes the push permit: its memory never adds to a push's.
+                let permit = work.clone().acquire_owned().await.unwrap();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    crate::seal::run(&store, retention_days)
+                })
+                .await;
                 tokio::time::sleep(std::time::Duration::from_secs(until_seal(
                     crate::time::now_ns(),
                 )))
@@ -542,15 +647,15 @@ mod tests {
     fn transport_checks_in_order() {
         assert!(is_zstd(Some("zstd")) && is_zstd(Some("ZSTD")));
         assert!(!is_zstd(None) && !is_zstd(Some("gzip")) && !is_zstd(Some("identity")));
-        assert_eq!(decode(b"not zstd").err(), Some(Some("body-zstd")));
+        assert_eq!(decode(b"not zstd".to_vec()).err(), Some(Some("body-zstd")));
         let garbage = zstd::encode_all(&[0xffu8; 8][..], 0).unwrap();
-        assert_eq!(decode(&garbage).err(), Some(Some("body-protobuf")));
+        assert_eq!(decode(garbage).err(), Some(Some("body-protobuf")));
         let req = PushRequest {
             node: "node-a".into(),
             ..Default::default()
         };
         let body = zstd::encode_all(&req.encode_to_vec()[..], 0).unwrap();
-        assert!(decode(&body).is_ok_and(|r| r == req));
+        assert!(decode(body).is_ok_and(|r| r == req));
         // The request-level reasons that follow (node-mismatch, stream-id-format,
         // first-seq-zero) are checked by Store::push: store::tests::response_table.
     }
@@ -590,5 +695,77 @@ mod tests {
             serde_json::to_string(&body).unwrap(),
             r#"{"streams":[{"node":"node-a","streamId":"qqqqqqqqqqqqqqqqqqqqqg==","ackedSeq":"10","lastReceiveNs":"1792397640000213904","lastRecordNs":"0"}],"agents":{},"diskFreeBytes":"1","diskReserveBytes":"2"}"#
         );
+    }
+
+    /// F07, F09: a window above 8 MiB and more records than 64 MiB of valid ones can hold are
+    /// refused before their memory is allocated.
+    #[test]
+    fn decode_bounds() {
+        let mut enc = zstd::Encoder::new(Vec::new(), 1).unwrap();
+        enc.set_parameter(zstd::stream::raw::CParameter::WindowLog(27))
+            .unwrap();
+        std::io::Write::write_all(&mut enc, b"\x0a\x06node-a").unwrap();
+        assert_eq!(decode(enc.finish().unwrap()).err(), Some(Some("body-zstd")));
+
+        let bomb = [0x22u8, 0x00].repeat(MAX_RECORDS + 1);
+        assert_eq!(count_records(&bomb), Some(MAX_RECORDS + 1));
+        assert_eq!(
+            decode(zstd::encode_all(&bomb[..], 3).unwrap()).err(),
+            Some(None)
+        );
+        let ok = [0x22u8, 0x00].repeat(MAX_RECORDS);
+        let req = decode(zstd::encode_all(&ok[..], 3).unwrap()).unwrap();
+        assert_eq!(req.records.len(), MAX_RECORDS);
+    }
+
+    /// F08: unfinished headers close the connection, an unfinished body gets 408, both after
+    /// their timeout.
+    #[tokio::test]
+    async fn slow_clients_time_out() {
+        use std::io::Write;
+        let root = crate::store::tests::tempdir("slow");
+        let store = Arc::new(Mutex::new(crate::store::tests::open(&root)));
+        let hash = crate::store::hex(&Sha256::digest(b"t"));
+        let cfg = Config::parse(&format!(
+            "listen = [\"x\"]\ndata_dir = \"{}\"\n[tls]\ncert_file = \"c\"\nkey_file = \"k\"\n[tokens]\n\"{hash}\" = \"node:node-a\"\n",
+            root.display()
+        ))
+        .unwrap();
+        let mut app = App::new(store, Arc::new(Metrics::new()), &cfg);
+        app.header_timeout = Duration::from_millis(300);
+        app.body_timeout = Duration::from_millis(300);
+        let app = Arc::new(app);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                tokio::spawn(serve_connection(tcp, false, app.clone()));
+            }
+        });
+        let exchange = |req: &'static [u8]| {
+            tokio::task::spawn_blocking(move || {
+                let start = std::time::Instant::now();
+                let mut c = std::net::TcpStream::connect(addr).unwrap();
+                c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                c.write_all(req).unwrap();
+                let mut out = Vec::new();
+                let _ = c.read_to_end(&mut out);
+                (start.elapsed(), String::from_utf8_lossy(&out).into_owned())
+            })
+        };
+        let (took, _) = exchange(b"POST /v1/push HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        assert!(took < Duration::from_secs(3), "headers: {took:?}");
+        let (took, _) = exchange(b"").await.unwrap();
+        assert!(took < Duration::from_secs(3), "idle: {took:?}");
+        let (_, response) = exchange(
+            b"POST /v1/push HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nContent-Encoding: zstd\r\nContent-Length: 100\r\n\r\nabc",
+        )
+        .await
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

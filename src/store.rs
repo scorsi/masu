@@ -45,10 +45,14 @@ pub struct Agent {
     pub oldest_unacked_ns: i64,
 }
 
+/// `AgentStatus.version` is kept up to this many bytes.
+pub const MAX_VERSION_BYTES: usize = 64;
+
 impl From<&AgentStatus> for Agent {
     fn from(s: &AgentStatus) -> Agent {
         Agent {
-            version: s.version.clone(),
+            // Bounded: it is kept in state.json and copied on every commit (review F15).
+            version: s.version[..s.version.floor_char_boundary(MAX_VERSION_BYTES)].into(),
             spool_bytes: s.spool_bytes,
             spool_limit_bytes: s.spool_limit_bytes,
             paused: s.paused,
@@ -891,5 +895,15 @@ pub mod tests {
             Reply::Ok { acked_seq: 1 }
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// F15: `AgentStatus.version` is kept to 64 bytes, on a character boundary.
+    #[test]
+    fn agent_version_is_bounded() {
+        let status = AgentStatus {
+            version: "é".repeat(100),
+            ..Default::default()
+        };
+        assert_eq!(Agent::from(&status).version, "é".repeat(32));
     }
 }

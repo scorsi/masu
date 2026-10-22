@@ -23,7 +23,13 @@ silently, nothing may appear twice. masu stores raw scrapes (0004), not samples.
 
 `POST /v1/push`, body = `PushRequest` ([ingest.proto](../../proto/masu/v1/ingest.proto)),
 `Content-Type: application/x-protobuf`, `Content-Encoding: zstd`, HTTPS (HTTP/2 when
-negotiated). At most 8 MiB compressed, 64 MiB decompressed.
+negotiated). At most 8 MiB compressed, 64 MiB decompressed; zstd window at most 8 MiB (a larger
+one is `body-zstd`, amendment 2026-10-22).
+
+Resources (amendment 2026-10-22, review F07, F08): one push is processed at a time (body,
+decode, commit; the seal takes the same turn), others wait; at most 32 connections; 10 s for
+the TLS handshake and for the request headers, 30 s for the body, 10 minutes per connection,
+4 HTTP/2 streams per connection. `AgentStatus.version` is kept to 64 bytes.
 
 Streams and sequence numbers as in nisshi's API: masu keeps per stream the highest committed
 `seq` (`hwm`), committed atomically with the data.
@@ -39,7 +45,8 @@ Streams and sequence numbers as in nisshi's API: masu keeps per stream the highe
 | the stream exists and belongs to another node (checked after the request-level 400s, before the records) | nothing | 403, `PushRejected{reason: "stream-owner"}` without index (ADR 0011) |
 | free space below `disk_reserve`, or a write error | rolls back to last commit | 507 |
 | the store clock puts the push on a sealed day, or the writer stopped after a failed rollback | nothing | 503 (ADR 0006 amendment) |
-| body too large | nothing | 413 |
+| body too large: over 8 MiB compressed, over 64 MiB decompressed, or more records than 64 MiB of valid records can hold (each is at least 154 bytes) | nothing | 413 |
+| body not received within 30 s | nothing | 408 |
 
 A batch is all or nothing. Delivery is at least once on the wire, exactly once on disk.
 Records are stored as received, plus `recv_ts` (commit time, same format as `ts`) appended as
