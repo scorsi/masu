@@ -153,7 +153,7 @@ pub fn verify(root: &Path, out: &mut impl Write) -> io::Result<Vec<String>> {
         errors.push("FORMAT: missing or not `masu-archive 1`".to_string());
     }
     let mut seen = Seen::default();
-    for node in node_dirs(&root)? {
+    for node in node_dirs(root)? {
         let node_name = node.file_name().unwrap().to_string_lossy().into_owned();
         for file in read_dir_sorted(&node)? {
             let Some(day) = data_day(&file) else {

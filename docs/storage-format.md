@@ -97,7 +97,11 @@ prefix of its data file up to its committed length in `state.json`, named
 `archive/<node>/<YYYY-MM-DD>.ndjson.zst.partial` in the backup tree. Never `state.json` itself.
 
 To restore: copy `FORMAT`, the sealed days and their manifests into an empty data directory,
-rename each `.partial` to `.ndjson.zst`, start masu. Without `state.json`, masu rebuilds each
+rename each `.partial` to `.ndjson.zst`, start masu. Leave out everything else the backup tree
+holds: the `LAST_RUN` marker at its root and any stray `*.tmp`. masu ignores a regular file
+directly under `archive/` and any file under `archive/<node>/` that is not
+`<YYYY-MM-DD>.ndjson.zst` or `<YYYY-MM-DD>.manifest.json`, and never reads one at the root
+other than `FORMAT` and `state.json`. Without `state.json`, masu rebuilds each
 stream's `hwm` and owner node before accepting pushes (ADR 0006 amendment):
 
 - from every manifest (largest `last_seq`), checked against its data file when present;

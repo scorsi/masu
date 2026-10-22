@@ -476,7 +476,7 @@ fn rebuild(root: &Path) -> io::Result<State> {
         ..State::default()
     };
     let (mut sealed, mut open) = (0, 0);
-    for node in node_dirs(&root)? {
+    for node in node_dirs(root)? {
         let Some(node_name) = node.file_name().and_then(|n| n.to_str()).map(String::from) else {
             continue;
         };

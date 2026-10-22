@@ -317,7 +317,7 @@ impl Scan {
 /// Deletes the data file of every sealed day older than `retention_days`; manifests stay.
 fn retention(root: &Path, today: &str, retention_days: u32) -> io::Result<()> {
     let today = time::parse_day(today).unwrap();
-    for node in node_dirs(&root)? {
+    for node in node_dirs(root)? {
         for file in read_dir_sorted(&node)? {
             let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let Some(day) = name.strip_suffix(".manifest.json") else {
