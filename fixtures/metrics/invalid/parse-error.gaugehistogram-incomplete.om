@@ -1,0 +1,3 @@
+# TYPE svc_queue_bytes gaugehistogram
+svc_queue_bytes_bucket{le="1024"} 3
+# EOF

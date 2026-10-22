@@ -1,0 +1,7 @@
+# TYPE svc_queue_bytes gaugehistogram
+# HELP svc_queue_bytes Bytes waiting in the queue.
+svc_queue_bytes_bucket{le="1024"} 3
+svc_queue_bytes_bucket{le="+Inf"} 5
+svc_queue_bytes_gcount 5
+svc_queue_bytes_gsum 4096
+# EOF

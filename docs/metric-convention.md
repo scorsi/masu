@@ -16,7 +16,8 @@ service's tests. ADR 0005.
 - Base units only: `seconds`, `bytes`, `ratio` (0–1). No `ms`, `kb`, `percent`.
 - Counters end in `_total`. Histograms in seconds or bytes, buckets fixed in the code.
 - `<service>_build_info{version="…"} 1` on every service.
-- Runtime metrics (`process_*`, `go_*`) allowed as the runtime gives them.
+- Runtime metrics (`process_*`, `go_*`) allowed as the runtime gives them, except the reserved
+  labels below.
 
 ## Labels
 
@@ -32,7 +33,8 @@ service's tests. ADR 0005.
 `masu validate --metrics` fails on: a forbidden label name (`ip`, `addr`, `client`, `qname`,
 `domain`, `host`, `path`, `url`, `user`, `id`, `request_id`), a reserved label, a counter
 without `_total`, a non-base unit suffix (`_ms`, `_milliseconds`, `_kb`, `_percent`), more than
-500 series, a parse error.
+500 series, a parse error (a histogram or gauge histogram without its `+Inf` bucket last,
+sum and count, or with a bucket or count that is negative or NaN, is one).
 
 ## Writing the endpoint by hand
 

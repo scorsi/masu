@@ -89,9 +89,8 @@ pub fn validate(body: &[u8], format: Format) -> Vec<Violation> {
     };
     let mut out = Vec::new();
     for f in &families {
-        if RUNTIME_PREFIXES.iter().any(|p| f.name.starts_with(p)) {
-            continue;
-        }
+        // Runtime metrics are exempt from the other rules, not from the reserved labels.
+        let runtime = RUNTIME_PREFIXES.iter().any(|p| f.name.starts_with(p));
         // One violation per family and rule (and label), at its first sample.
         let mut seen = HashSet::new();
         let mut report = |rule: Rule, key: &str, line: usize, message: String| {
@@ -101,13 +100,16 @@ pub fn validate(body: &[u8], format: Format) -> Vec<Violation> {
         };
         for s in &f.samples {
             for (label, _) in &s.labels {
-                if FORBIDDEN_LABELS.contains(&label.as_str()) {
+                if !runtime && FORBIDDEN_LABELS.contains(&label.as_str()) {
                     let m = format!("`{}` has the forbidden label `{label}`", s.name);
                     report(Rule::ForbiddenLabel, label, s.line, m);
                 } else if RESERVED_LABELS.contains(&label.as_str()) {
                     let m = format!("`{}` has the reserved label `{label}`", s.name);
                     report(Rule::ReservedLabel, label, s.line, m);
                 }
+            }
+            if runtime {
+                continue;
             }
             if f.kind == Kind::Counter
                 && !s.name.ends_with("_total")
@@ -170,6 +172,9 @@ mod tests {
         assert_eq!(rules("svc_a 1\nsvc_a 2\n"), [Rule::ParseError]);
         // Runtime metrics are exempt from the naming rules.
         assert!(rules("go_thing_ms{id=\"1\"} 1\n").is_empty());
+        // Not from the reserved labels.
+        assert_eq!(rules("go_x{node=\"node-a\"} 1\n"), [Rule::ReservedLabel]);
+        assert_eq!(rules("process_x{service=\"a\"} 1\n"), [Rule::ReservedLabel]);
         assert_eq!(validate(b"a 1\n\xff\n", Format::Prometheus)[0].line, 2);
     }
 

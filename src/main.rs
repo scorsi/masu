@@ -167,9 +167,12 @@ fn fetch(rest: &str) -> Result<(Vec<u8>, Format), String> {
     .map_err(|e| e.to_string())?;
     let mut response = Vec::new();
     stream
-        .take(MAX_RESPONSE_BYTES)
+        .take(MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut response)
         .map_err(|e| e.to_string())?;
+    if response.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(format!("response larger than {MAX_RESPONSE_BYTES} bytes"));
+    }
     parse_response(&response)
 }
 
@@ -183,6 +186,7 @@ fn parse_response(response: &[u8]) -> Result<(Vec<u8>, Format), String> {
         return Err(format!("HTTP `{status}`"));
     }
     let mut format = Format::Prometheus;
+    let (mut chunked, mut length) = (false, None);
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -193,11 +197,23 @@ fn parse_response(response: &[u8]) -> Result<(Vec<u8>, Format), String> {
             "content-encoding" if !value.eq_ignore_ascii_case("identity") => {
                 return Err(format!("unexpected Content-Encoding `{value}`"));
             }
-            "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => {
-                body = dechunk(&body)?;
+            "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => chunked = true,
+            "content-length" => {
+                length = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "malformed Content-Length")?,
+                )
             }
             _ => {}
         }
+    }
+    if chunked {
+        body = dechunk(&body)?;
+    } else if let Some(n) = length
+        && body.len() != n
+    {
+        return Err(format!("{} body bytes, Content-Length {n}", body.len()));
     }
     Ok((body, format))
 }
@@ -214,11 +230,15 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
         if size == 0 {
             return Ok(out);
         }
-        if rest.len() < size + 2 {
+        let end = size.checked_add(2).ok_or("malformed chunk size")?;
+        if rest.len() < end {
             return Err("truncated chunk".into());
         }
+        if &rest[size..end] != b"\r\n" {
+            return Err("chunk without CRLF".into());
+        }
         out.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
+        rest = &rest[end..];
     }
 }
 
@@ -245,5 +265,19 @@ mod tests {
 
         assert!(parse_response(b"HTTP/1.1 404 Not Found\r\n\r\n").is_err());
         assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\nx").is_err());
+
+        // F17: none of these panics or validates.
+        for bad in [
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nx"[..],
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\na 1\nXX0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nsvc_up 1\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\nsvc_up 1\n",
+        ] {
+            assert!(
+                parse_response(bad).is_err(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
     }
 }

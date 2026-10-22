@@ -182,8 +182,10 @@ pub fn parse(text: &str, format: Format) -> Result<Vec<Family>, ParseError> {
         });
     }
     for f in &p.families {
-        if f.kind == Kind::Histogram {
-            check_histogram(f)?;
+        match f.kind {
+            Kind::Histogram => check_histogram(f, "_sum", "_count")?,
+            Kind::GaugeHistogram => check_histogram(f, "_gsum", "_gcount")?,
+            _ => {}
         }
     }
     Ok(p.families)
@@ -516,7 +518,9 @@ struct Group {
     count: Option<f64>,
 }
 
-fn check_histogram(f: &Family) -> Result<(), ParseError> {
+/// Buckets, sum and count of a histogram (`_sum`, `_count`) or gauge histogram (`_gsum`,
+/// `_gcount`). Buckets and count are counts: neither NaN nor negative.
+fn check_histogram(f: &Family, sum: &str, count: &str) -> Result<(), ParseError> {
     let mut groups: Vec<Group> = Vec::new();
     for s in &f.samples {
         let mut labels: Vec<_> = s
@@ -543,7 +547,11 @@ fn check_histogram(f: &Family) -> Result<(), ParseError> {
             line: s.line,
             message,
         };
-        match &s.name[f.name.len()..] {
+        let suffix = &s.name[f.name.len()..];
+        if (suffix == "_bucket" || suffix == count) && (s.value.is_nan() || s.value < 0.0) {
+            return Err(error(format!("`{}` is not a count: {}", s.name, s.value)));
+        }
+        match suffix {
             "_bucket" => {
                 let le = s
                     .labels
@@ -563,8 +571,8 @@ fn check_histogram(f: &Family) -> Result<(), ParseError> {
                 }
                 g.buckets.push((bound, s.value, s.line));
             }
-            "_sum" => g.sum = true,
-            "_count" => g.count = Some(s.value),
+            x if x == sum => g.sum = true,
+            x if x == count => g.count = Some(s.value),
             _ => {}
         }
     }
@@ -577,10 +585,10 @@ fn check_histogram(f: &Family) -> Result<(), ParseError> {
             return Err(error("no `le=\"+Inf\"` bucket last".into()));
         };
         let Some(count) = g.count else {
-            return Err(error("no `_count`".into()));
+            return Err(error(format!("no `{count}`")));
         };
         if !g.sum {
-            return Err(error("no `_sum`".into()));
+            return Err(error(format!("no `{sum}`")));
         }
         if count != inf {
             return Err(error(format!(
