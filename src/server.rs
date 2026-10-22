@@ -854,6 +854,33 @@ mod tests {
         drop(slot);
         let admitted = waiting.await.unwrap();
         assert!(admitted.starts_with("HTTP/1.1 200"), "{admitted}");
+
+        // Review N1 (nisshi): a refusal sent before the body is read never waits for that
+        // body. The declared body never comes; the answer arrives within the deadline and the
+        // connection closes (hyper stops reading a dropped body and disables keep-alive).
+        let slot = app.work.clone().acquire_owned().await.unwrap();
+        for (auth, code) in [("t", "503"), ("bad", "401")] {
+            let (took, response) = tokio::task::spawn_blocking(move || {
+                let start = std::time::Instant::now();
+                let mut c = std::net::TcpStream::connect(addr).unwrap();
+                c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let head = format!(
+                    "POST /v1/push HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {auth}\r\nContent-Encoding: zstd\r\nContent-Length: 100\r\n\r\n"
+                );
+                c.write_all(head.as_bytes()).unwrap();
+                let mut out = Vec::new();
+                let _ = c.read_to_end(&mut out);
+                (start.elapsed(), String::from_utf8_lossy(&out).into_owned())
+            })
+            .await
+            .unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {code}")),
+                "{response}"
+            );
+            assert!(took < Duration::from_millis(1500), "{code} took {took:?}");
+        }
+        drop(slot);
         let _ = std::fs::remove_dir_all(root);
     }
 }
