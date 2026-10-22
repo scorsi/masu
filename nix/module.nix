@@ -109,7 +109,7 @@ in
       {
         assertion =
           cfg.metrics.listen == null
-          || builtins.match "(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|\\[::1\\]):[0-9]+" cfg.metrics.listen != null;
+          || builtins.match "(127\\.[0-9]+\\.[0-9]+\\.[0-9]+|\\[::1]):[0-9]+" cfg.metrics.listen != null;
         message = "services.masu.metrics.listen: a loopback address and port (/metrics has no authentication).";
       }
     ];
