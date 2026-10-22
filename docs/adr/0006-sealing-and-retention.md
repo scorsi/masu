@@ -46,11 +46,16 @@ Status: Accepted — 2026-10-22 (owner decision, after the code review of 2026-1
 - **Recovery refuses lost data.** An open file shorter than its committed length, or missing,
   stops the start with an error instead of being padded or forgotten: its `hwm` would
   acknowledge records the store no longer has.
-- **Restore.** Backups hold `FORMAT` and the sealed days (data files and manifests), never
-  `state.json` (it may acknowledge open days the backup does not hold). To restore: copy the
-  backed-up files into an empty data directory, start masu. A start without `state.json` reads
-  every manifest (checked against its data file when the file is there; a mismatch stops the
-  start) and rebuilds each stream's `hwm` (the largest `last_seq`) and owner node (ADR 0011)
-  before it accepts pushes, logging one `state-rebuilt` event. Records pushed after the backup
-  and lost with the disk come back as a `seq-gap`; records the backup holds are never stored
-  twice.
+- **Backup and restore** (owner decision 2026-10-22: backups twice a day, RPO about 12 h).
+  Backups hold `FORMAT`, the sealed days (data files and manifests) and, for each open day, the
+  prefix of its data file up to its committed length, as `<day>.ndjson.zst.partial`; never
+  `state.json` (it may acknowledge records the backup does not hold). To restore: copy the
+  backed-up files into an empty data directory, rename each `.partial` to `.ndjson.zst`, start
+  masu. A start without `state.json` rebuilds each stream's `hwm` and owner node (ADR 0011)
+  before it accepts pushes, logging one `state-rebuilt` event: from every manifest (largest
+  `last_seq`; checked against its data file when the file is there, a mismatch stops the
+  start) and from the complete frames of every day file without a manifest, which stays open at
+  that length (a truncated last frame is cut off). Records pushed after the backup and lost
+  with the disk come back as a `seq-gap`; records the backup holds are never stored twice.
+  With `state.json` present, recovery is unchanged: a day file absent from it and without a
+  manifest is an interrupted first commit, truncated to zero.

@@ -452,48 +452,66 @@ impl Store {
     }
 }
 
-/// The state of a data directory without `state.json` (a restore of the backed-up sealed days,
-/// or a first start): each stream's `hwm` and owner from the manifests, every manifest checked
-/// against its data file when that file is still there. Days without a manifest are left to
-/// recovery (truncated to zero).
+/// The state of a data directory without `state.json` (a restore, or a first start): each
+/// stream's `hwm` and owner from the manifests of the sealed days, each checked against its
+/// data file when that file is still there, and from the complete frames of every unsealed day
+/// file (a restored `.partial`), which stays open at that length.
 fn rebuild(root: &Path) -> io::Result<State> {
     let mut state = State {
         v: 1,
         ..State::default()
     };
-    let mut days = 0;
+    let (mut sealed, mut open) = (0, 0);
     for node in read_dir_sorted(&root.join("archive"))? {
         let Some(node_name) = node.file_name().and_then(|n| n.to_str()).map(String::from) else {
             continue;
         };
         for file in read_dir_sorted(&node)? {
             let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let Some(day) = name.strip_suffix(".manifest.json") else {
+            let fail =
+                |day: &str, e: io::Error| io::Error::other(format!("{node_name}/{day}: {e}"));
+            let ranges: Vec<(String, u64)> = if let Some(day) = name.strip_suffix(".manifest.json")
+            {
+                let data = node.join(format!("{day}.ndjson.zst"));
+                let m = if data.exists() {
+                    crate::seal::check_sealed(&data, &file)
+                } else {
+                    crate::seal::read_manifest(&file)
+                }
+                .map_err(|e| fail(day, e))?;
+                sealed += 1;
+                m.streams
+                    .into_iter()
+                    .map(|r| (r.stream, r.last_seq))
+                    .collect()
+            } else if let Some(day) = name.strip_suffix(".ndjson.zst")
+                && !node.join(format!("{day}.manifest.json")).exists()
+            {
+                let (len, scan) = crate::seal::scan_open(&file).map_err(|e| fail(day, e))?;
+                state.files.insert(format!("{node_name}/{day}"), len);
+                open += 1;
+                scan.streams
+                    .into_iter()
+                    .map(|(s, (_, last))| (s, last))
+                    .collect()
+            } else {
                 continue;
             };
-            let data = node.join(format!("{day}.ndjson.zst"));
-            let m = if data.exists() {
-                crate::seal::check_sealed(&data, &file)
-            } else {
-                crate::seal::read_manifest(&file)
-            }
-            .map_err(|e| io::Error::other(format!("{node_name}/{day}: {e}")))?;
-            for r in m.streams {
-                let s = state.streams.entry(r.stream).or_insert(StreamState {
+            for (stream, last_seq) in ranges {
+                let s = state.streams.entry(stream).or_insert(StreamState {
                     node: node_name.clone(),
                     hwm: 0,
                     last_receive_ns: 0,
                     last_record_ns: 0,
                 });
-                s.hwm = s.hwm.max(r.last_seq);
+                s.hwm = s.hwm.max(last_seq);
             }
-            days += 1;
         }
     }
-    if days > 0 {
+    if sealed + open > 0 {
         crate::log::info(
             "state-rebuilt",
-            serde_json::json!({"sealed_days": days, "streams": state.streams.len()}),
+            serde_json::json!({"sealed_days": sealed, "open_days": open, "streams": state.streams.len()}),
         );
     }
     Ok(state)
@@ -905,5 +923,50 @@ pub mod tests {
             ..Default::default()
         };
         assert_eq!(Agent::from(&status).version, "é".repeat(32));
+    }
+
+    /// Restore of an open day backed up as `.partial` (its committed prefix, maybe cut inside
+    /// a frame): the complete frames rebuild the streams and stay open; the cut tail goes.
+    #[test]
+    fn restore_partial_open_day() {
+        let root = tempdir("partial");
+        let mut s = open(&root);
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 1, 5)),
+            Reply::Ok { acked_seq: 5 }
+        );
+        let complete = fs::metadata(s.data_path(s.state.files.keys().next().unwrap()))
+            .unwrap()
+            .len();
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 6, 5)),
+            Reply::Ok { acked_seq: 10 }
+        );
+        let key = s.state.files.keys().next().unwrap().clone();
+        let data = fs::read(s.data_path(&key)).unwrap();
+        drop(s);
+        let restored = tempdir("partial-restored");
+        fs::copy(root.join("FORMAT"), restored.join("FORMAT")).unwrap();
+        let path = restored.join(format!("archive/{key}.ndjson.zst"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Copied while the second frame was being written: half of it.
+        let cut = complete as usize + (data.len() - complete as usize) / 2;
+        fs::write(&path, &data[..cut]).unwrap();
+        let mut s = open(&restored);
+        assert_eq!(s.state.files[&key], complete);
+        assert_eq!(fs::metadata(&path).unwrap().len(), complete);
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 5);
+        assert_eq!(s.state.streams[&hex(&STREAM)].node, "node-a");
+        assert_eq!(
+            s.push("node-a", &request("node-a", &STREAM, 3, 8)),
+            Reply::Ok { acked_seq: 10 }
+        );
+        assert_eq!(seqs(&s, "node-a"), (1..=10).collect::<Vec<_>>());
+        assert_eq!(
+            s.push("node-b", &request("node-b", &STREAM, 11, 1)),
+            Reply::Forbidden("stream-owner".into())
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(restored);
     }
 }

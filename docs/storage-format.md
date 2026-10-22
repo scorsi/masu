@@ -89,12 +89,23 @@ committed length, or missing, stops the start (acknowledged records are gone). A
 `state.json` that has a manifest is an interrupted seal: its file must match the manifest, and
 the day is then sealed (ADR 0006 amendment).
 
-## Restore (writer)
+## Backup and restore (writer)
 
-Backups hold `FORMAT`, the sealed data files and the manifests, never `state.json`. Copy them
-into an empty data directory and start masu: without `state.json`, it rebuilds each stream's
-`hwm` (largest `last_seq` of the manifests) and owner node from the manifests, each checked
-against its data file when present, before accepting pushes (ADR 0006 amendment).
+Backups hold `FORMAT`, the sealed data files and their manifests, and, for each open day, the
+prefix of its data file up to its committed length in `state.json`, named
+`archive/<node>/<YYYY-MM-DD>.ndjson.zst.partial` in the backup tree. Never `state.json` itself.
+
+To restore: copy `FORMAT`, the sealed days and their manifests into an empty data directory,
+rename each `.partial` to `.ndjson.zst`, start masu. Without `state.json`, masu rebuilds each
+stream's `hwm` and owner node before accepting pushes (ADR 0006 amendment):
+
+- from every manifest (largest `last_seq`), checked against its data file when present;
+- from every day file without a manifest: its complete zstd frames are scanned and the day
+  stays open at their length; a truncated last frame is cut off.
+
+Records pushed after the backup and lost come back as a `seq-gap`; records the backup holds
+are never stored twice. With `state.json` present, a day file absent from it and without a
+manifest is still an interrupted first commit, truncated to zero.
 
 ## Reading with standard tools
 

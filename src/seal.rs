@@ -192,6 +192,28 @@ pub fn scan_file(path: &Path) -> io::Result<Scan> {
     Ok(scan)
 }
 
+/// The complete frames of an unsealed day file (a restored `.partial`): their length and what
+/// they hold. A truncated last frame is left out; a complete frame that does not decode to
+/// records is an error.
+pub fn scan_open(path: &Path) -> io::Result<(u64, Scan)> {
+    // shortcut: the file is read whole (an open day is tens of MiB compressed); stream it if
+    // open days grow.
+    let bytes = fs::read(path)?;
+    let mut scan = Scan::default();
+    let mut end = 0;
+    let mut line = Vec::new();
+    while let Ok(n) = zstd::zstd_safe::find_frame_compressed_size(&bytes[end..]) {
+        let mut d = zstd::Decoder::new(&bytes[end..end + n])?;
+        d.window_log_max(WINDOW_LOG)?;
+        let mut lines = BufReader::new(d);
+        while next_line(&mut lines, &mut line)? {
+            scan.line(&line)?;
+        }
+        end += n;
+    }
+    Ok((end as u64, scan))
+}
+
 pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     serde_json::from_slice(&fs::read(path)?).map_err(|e| io::Error::other(format!("manifest: {e}")))
 }
@@ -235,7 +257,8 @@ pub struct Scan {
     min_ts: Option<String>,
     max_ts: Option<String>,
     services: BTreeMap<String, u64>,
-    streams: BTreeMap<String, (u64, u64)>,
+    /// Stream → (first, last) seq.
+    pub streams: BTreeMap<String, (u64, u64)>,
 }
 
 impl Scan {
