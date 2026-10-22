@@ -502,6 +502,12 @@ fn rebuild(root: &Path) -> io::Result<State> {
                     crate::seal::read_manifest(&file)
                 }
                 .map_err(|e| fail(day, e))?;
+                if (m.node.as_str(), m.day.as_str()) != (node_name.as_str(), day) {
+                    return Err(fail(
+                        day,
+                        io::Error::other(format!("manifest is for {}/{}", m.node, m.day)),
+                    ));
+                }
                 sealed += 1;
                 m.streams
                     .into_iter()
@@ -511,6 +517,12 @@ fn rebuild(root: &Path) -> io::Result<State> {
                 && !node.join(format!("{day}.manifest.json")).exists()
             {
                 let (len, scan) = crate::seal::scan_open(&file).map_err(|e| fail(day, e))?;
+                if let Some(other) = scan.nodes.iter().find(|n| **n != node_name) {
+                    return Err(fail(
+                        day,
+                        io::Error::other(format!("holds records of node {other}")),
+                    ));
+                }
                 state.files.insert(format!("{node_name}/{day}"), len);
                 open += 1;
                 scan.streams
@@ -521,12 +533,19 @@ fn rebuild(root: &Path) -> io::Result<State> {
                 continue;
             };
             for (stream, last_seq) in ranges {
-                let s = state.streams.entry(stream).or_insert(StreamState {
+                let s = state.streams.entry(stream.clone()).or_insert(StreamState {
                     node: node_name.clone(),
                     hwm: 0,
                     last_receive_ns: 0,
                     last_record_ns: 0,
                 });
+                // ADR 0011: one owner per stream; a contradiction is not guessed away.
+                if s.node != node_name {
+                    return Err(io::Error::other(format!(
+                        "stream {stream} found under {} and {node_name}",
+                        s.node
+                    )));
+                }
                 s.hwm = s.hwm.max(last_seq);
             }
         }
@@ -1022,5 +1041,140 @@ pub mod tests {
         );
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(restored);
+    }
+
+    /// Three frames of node-a's open day (records 1–3, 4–6, 7–9), their bytes and their ends.
+    fn three_frames(name: &str) -> (String, Vec<u8>, Vec<usize>) {
+        let root = tempdir(name);
+        let mut s = open(&root);
+        let mut ends = Vec::new();
+        for first in [1, 4, 7] {
+            s.push("node-a", &request("node-a", &STREAM, first, 3));
+            ends.push(
+                fs::metadata(s.data_path(s.state.files.keys().next().unwrap()))
+                    .unwrap()
+                    .len() as usize,
+            );
+        }
+        let key = s.state.files.keys().next().unwrap().clone();
+        let data = fs::read(s.data_path(&key)).unwrap();
+        drop(s);
+        let _ = fs::remove_dir_all(root);
+        (key, data, ends)
+    }
+
+    /// A restore dir holding `files` (path under archive/ → bytes) and FORMAT; the open result.
+    fn restore(name: &str, files: &[(String, Vec<u8>)]) -> (PathBuf, io::Result<Store>) {
+        let restored = tempdir(name);
+        fs::write(restored.join("FORMAT"), FORMAT).unwrap();
+        for (path, bytes) in files {
+            let path = restored.join("archive").join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let s = Store::open(&restored, 0, Arc::new(Metrics::new()));
+        (restored, s)
+    }
+
+    /// Validation item 2: a frame that does not decode, with more bytes after it, refuses the
+    /// restore and truncates nothing; only a frame cut by the end of the file is dropped.
+    #[test]
+    fn restore_refuses_a_corrupt_frame() {
+        let (key, data, ends) = three_frames("corrupt");
+        let file = format!("{key}.ndjson.zst");
+        // The second frame's magic number damaged, the third frame intact after it.
+        let mut bad = data.clone();
+        bad[ends[0]] ^= 0xff;
+        let (dir, s) = restore("corrupt-magic", &[(file.clone(), bad.clone())]);
+        let err = s.err().unwrap().to_string();
+        assert!(err.contains("corrupt frame at byte"), "{err}");
+        assert_eq!(fs::read(dir.join("archive").join(&file)).unwrap(), bad);
+        let _ = fs::remove_dir_all(dir);
+        // Garbage inside the second frame's blocks.
+        let mut bad = data.clone();
+        for b in &mut bad[ends[0] + 8..ends[1] - 4] {
+            *b = 0xff;
+        }
+        let (dir, s) = restore("corrupt-block", &[(file.clone(), bad.clone())]);
+        assert!(s.is_err());
+        assert_eq!(fs::read(dir.join("archive").join(&file)).unwrap(), bad);
+        let _ = fs::remove_dir_all(dir);
+        // Cut inside the third frame: the first two stay.
+        let (dir, s) = restore("cut", &[(file.clone(), data[..ends[2] - 3].to_vec())]);
+        let s = s.unwrap();
+        assert_eq!(s.state.files[&key], ends[1] as u64);
+        assert_eq!(s.state.streams[&hex(&STREAM)].hwm, 6);
+        drop(s);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Validation item 4: a day restored under another node's directory, or one stream under two
+    /// nodes, refuses the rebuild instead of picking an owner.
+    #[test]
+    fn restore_refuses_contradicting_owners() {
+        let (key, data, _) = three_frames("owners");
+        let day = key.split_once('/').unwrap().1;
+        // node-a's open day under node-b.
+        let (dir, s) = restore(
+            "owners-moved",
+            &[(format!("node-b/{day}.ndjson.zst"), data.clone())],
+        );
+        let err = s.err().unwrap().to_string();
+        assert!(err.contains("records of node node-a"), "{err}");
+        let _ = fs::remove_dir_all(dir);
+        // node-a's sealed day: data and manifest moved under node-b.
+        let (dir, s) = restore(
+            "owners-sealed",
+            &[(format!("node-a/{day}.ndjson.zst"), data.clone())],
+        );
+        let s = Arc::new(std::sync::Mutex::new(s.unwrap()));
+        let old_day = "2020-01-02";
+        {
+            let mut st = s.lock().unwrap();
+            fs::rename(
+                st.data_path(&key),
+                st.data_path(&format!("node-a/{old_day}")),
+            )
+            .unwrap();
+            let len = st.state.files.remove(&key).unwrap();
+            st.state.files.insert(format!("node-a/{old_day}"), len);
+            st.write_state().unwrap();
+        }
+        crate::seal::run(&s, 0);
+        drop(s);
+        let manifest =
+            fs::read(dir.join(format!("archive/node-a/{old_day}.manifest.json"))).unwrap();
+        let sealed = fs::read(dir.join(format!("archive/node-a/{old_day}.ndjson.zst"))).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let (dir, s) = restore(
+            "owners-sealed-moved",
+            &[
+                (format!("node-b/{old_day}.ndjson.zst"), sealed.clone()),
+                (format!("node-b/{old_day}.manifest.json"), manifest.clone()),
+            ],
+        );
+        let err = s.err().unwrap().to_string();
+        assert!(err.contains("manifest is for node-a/"), "{err}");
+        let _ = fs::remove_dir_all(dir);
+        // The same stream under node-a (sealed) and node-b (open, records rewritten to node-b).
+        let b: Vec<u8> = zstd::encode_all(
+            &String::from_utf8(record("node-b", &STREAM, 20).to_vec())
+                .map(|r| r + "\n")
+                .unwrap()
+                .into_bytes()[..],
+            3,
+        )
+        .unwrap();
+        let (dir, s) = restore(
+            "owners-two",
+            &[
+                (format!("node-a/{old_day}.ndjson.zst"), sealed),
+                (format!("node-a/{old_day}.manifest.json"), manifest),
+                (format!("node-b/{day}.ndjson.zst"), b),
+            ],
+        );
+        let err = s.err().unwrap().to_string();
+        assert!(err.contains("found under node-a and node-b"), "{err}");
+        let _ = fs::remove_dir_all(dir);
     }
 }

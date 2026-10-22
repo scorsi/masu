@@ -104,9 +104,13 @@ directly under `archive/` and any file under `archive/<node>/` that is not
 other than `FORMAT` and `state.json`. Without `state.json`, masu rebuilds each
 stream's `hwm` and owner node before accepting pushes (ADR 0006 amendment):
 
-- from every manifest (largest `last_seq`), checked against its data file when present;
+- from every manifest (largest `last_seq`), checked against its data file when present and
+  against its path (`node`, `day`);
 - from every day file without a manifest: its complete zstd frames are scanned and the day
-  stays open at their length; a truncated last frame is cut off.
+  stays open at their length; a last frame cut by the end of the file is cut off, a frame that
+  does not decode stops the start.
+
+A stream found under two nodes stops the start.
 
 Records pushed after the backup and lost come back as a `seq-gap`; records the backup holds
 are never stored twice. With `state.json` present, a day file absent from it and without a

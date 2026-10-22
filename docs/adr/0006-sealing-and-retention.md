@@ -61,8 +61,11 @@ Status: Accepted — 2026-10-22 (owner decision, after the code review of 2026-1
   masu. A start without `state.json` rebuilds each stream's `hwm` and owner node (ADR 0011)
   before it accepts pushes, logging one `state-rebuilt` event: from every manifest (largest
   `last_seq`; checked against its data file when the file is there, a mismatch stops the
-  start) and from the complete frames of every day file without a manifest, which stays open at
-  that length (a truncated last frame is cut off). Records pushed after the backup and lost
+  start; its `node` and `day` must be those of its path) and from the complete frames of every
+  day file without a manifest, which stays open at that length (a last frame cut by the end of
+  the file is cut off; a frame that does not decode stops the start, nothing is truncated). A
+  stream found under two nodes, or records of another node in a node's day file, stop the
+  start: the owner is never guessed. Records pushed after the backup and lost
   with the disk come back as a `seq-gap`; records the backup holds are never stored twice.
   With `state.json` present, recovery is unchanged: a day file absent from it and without a
   manifest is an interrupted first commit, truncated to zero.

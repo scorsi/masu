@@ -7,7 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -193,25 +193,39 @@ pub fn scan_file(path: &Path) -> io::Result<Scan> {
 }
 
 /// The complete frames of an unsealed day file (a restored `.partial`): their length and what
-/// they hold. A truncated last frame is left out; a complete frame that does not decode to
-/// records is an error.
+/// they hold. Only a last frame cut short (the file ends inside it) is left out; a frame that
+/// does not decode, or a complete frame that does not hold records, is an error: nothing after
+/// it may be truncated away. The file is streamed, frame by frame, never read whole.
 pub fn scan_open(path: &Path) -> io::Result<(u64, Scan)> {
-    // shortcut: the file is read whole (an open day is tens of MiB compressed); stream it if
-    // open days grow.
-    let bytes = fs::read(path)?;
-    let mut scan = Scan::default();
+    let len = fs::metadata(path)?.len();
+    let mut file = BufReader::new(File::open(path)?);
     let mut end = 0;
-    let mut line = Vec::new();
-    while let Ok(n) = zstd::zstd_safe::find_frame_compressed_size(&bytes[end..]) {
-        let mut d = zstd::Decoder::new(&bytes[end..end + n])?;
-        d.window_log_max(WINDOW_LOG)?;
-        let mut lines = BufReader::new(d);
-        while next_line(&mut lines, &mut line)? {
-            scan.line(&line)?;
+    while end < len {
+        let frame = zstd::Decoder::with_buffer(&mut file).and_then(|d| {
+            let mut d = d.single_frame();
+            d.window_log_max(WINDOW_LOG)?;
+            io::copy(&mut d, &mut io::sink())
+        });
+        match frame {
+            Ok(_) => end = file.stream_position()?,
+            // The decoder ran out of input inside the frame: the backup cut it.
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => {
+                return Err(io::Error::other(format!(
+                    "corrupt frame at byte {end} of {len}: {e}"
+                )));
+            }
         }
-        end += n;
     }
-    Ok((end as u64, scan))
+    let mut d = zstd::Decoder::new(File::open(path)?.take(end))?;
+    d.window_log_max(WINDOW_LOG)?;
+    let mut lines = BufReader::new(d);
+    let mut scan = Scan::default();
+    let mut line = Vec::new();
+    while next_line(&mut lines, &mut line)? {
+        scan.line(&line)?;
+    }
+    Ok((end, scan))
 }
 
 pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
@@ -259,6 +273,8 @@ pub struct Scan {
     services: BTreeMap<String, u64>,
     /// Stream → (first, last) seq.
     pub streams: BTreeMap<String, (u64, u64)>,
+    /// The records' `node`s (one, the file's, in a sound archive).
+    pub nodes: std::collections::BTreeSet<String>,
 }
 
 impl Scan {
@@ -277,6 +293,11 @@ impl Scan {
             if self.max_ts.as_deref().is_none_or(|m| ts > m) {
                 self.max_ts = Some(ts.into());
             }
+        }
+        if let Some(node) = v["node"].as_str()
+            && !self.nodes.contains(node)
+        {
+            self.nodes.insert(node.into());
         }
         if let Some(service) = v["service"].as_str() {
             *self.services.entry(service.into()).or_insert(0) += 1;
