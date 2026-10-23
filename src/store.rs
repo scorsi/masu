@@ -1199,4 +1199,33 @@ pub mod tests {
         assert!(err.contains("found under node-a and node-b"), "{err}");
         let _ = fs::remove_dir_all(dir);
     }
+
+    /// Validation 2, review R1: a sealed day whose path and manifest both say node-b but whose
+    /// records say node-a (hash still right) refuses the restore and changes nothing.
+    #[test]
+    fn restore_refuses_a_sealed_day_of_another_node() {
+        let (key, data, _) = three_frames("sealed-owner");
+        let day = key.split_once('/').unwrap().1;
+        let scratch = tempdir("sealed-owner-scan");
+        fs::write(scratch.join("day"), &data).unwrap();
+        let m = crate::seal::scan_file(&scratch.join("day"))
+            .unwrap()
+            .manifest("node-b", day, "2026-10-23T00:00:00Z".into());
+        let _ = fs::remove_dir_all(scratch);
+        let files = [
+            (format!("node-b/{day}.ndjson.zst"), data),
+            (
+                format!("node-b/{day}.manifest.json"),
+                serde_json::to_vec(&m).unwrap(),
+            ),
+        ];
+        let (dir, s) = restore("sealed-owner-moved", &files);
+        let err = s.err().unwrap().to_string();
+        assert!(err.contains("records of node node-a"), "{err}");
+        for (path, bytes) in &files {
+            assert_eq!(&fs::read(dir.join("archive").join(path)).unwrap(), bytes);
+        }
+        assert!(!dir.join("state.json").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
 }

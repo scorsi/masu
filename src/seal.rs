@@ -240,7 +240,12 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
 /// The manifest, after checking that `data` holds exactly what it records.
 pub fn check_sealed(data: &Path, manifest: &Path) -> io::Result<Manifest> {
     let m = read_manifest(manifest)?;
-    let got = scan_file(data)?.manifest(&m.node, &m.day, m.sealed_at.clone());
+    let scan = scan_file(data)?;
+    // The manifest's `node` is not in the hash: the records must agree with it (ADR 0006).
+    if let Some(other) = scan.nodes.iter().find(|n| **n != m.node) {
+        return Err(io::Error::other(format!("holds records of node {other}")));
+    }
+    let got = scan.manifest(&m.node, &m.day, m.sealed_at.clone());
     match differences(&got, &m) {
         diff if diff.is_empty() => Ok(m),
         diff => Err(io::Error::other(format!(
