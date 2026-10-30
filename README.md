@@ -7,7 +7,7 @@
 *枡 (masu): the wooden measuring box of Edo markets, the standard every quantity was measured
 against.*
 
-**Status:** M1 (archive: `masu serve`, seal and retention, `masu read`, `masu verify`,
+**Status:** M1 (archive: `masu-store serve`, seal and retention, `masu read`, `masu verify`,
 `services.masu`); mTLS is M2.
 
 ## Role
@@ -18,6 +18,11 @@ against.*
 - **Later** (own milestones, not in the minimal base): the time-series engine (Gorilla-style
   blocks, downsampling, range queries) built from the raw archive, and a query API for
   [yagura](../yagura) and [hanshou](../hanshou).
+
+## Binaries
+
+`masu` is the data CLI (`validate`, `read`, `verify`); `masu-store` is the datastore
+(`serve`, `check-config`, `--version`); both build on the `masu-core` library (ADR 0012).
 
 ## Not its job
 
@@ -61,9 +66,9 @@ names, domains or addresses of any deployment.
 
 ## Testing hooks
 
-- `MASU_TEST_NOW=<ts>` (same format as `ts`) shifts `masu serve`'s clock to that instant at
+- `MASU_TEST_NOW=<ts>` (same format as `ts`) shifts `masu-store serve`'s clock to that instant at
   start-up; it keeps running from there. Test only: the nixosTests use it to seal a day and to
   run retention without waiting for midnight.
-- `masu-pusher` (`cargo build --features pusher`, `pkgs.masu.pusher`) runs a scenario of
+- `masu-pusher` (crate `crates/masu-pusher`, `pkgs.masu.pusher`) runs a scenario of
   `fixtures/delivery/` or every line of `fixtures/records/records.ndjson` against a running
   store; not shipped in the package.

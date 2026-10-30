@@ -30,6 +30,10 @@ The delivery semantics themselves (ADR 0003: streams, `hwm`, the response table,
 ## Conventions
 
 - Crates limited to ADR 0002; any other crate is an ADR.
+- Binaries (ADR 0012): `masu-core` (library), `masu` (data CLI), `masu-store` (datastore),
+  `masu-pusher` (tests only). `masu-query` is reserved for the future query daemon.
+- Check with `nix develop -c cargo test --workspace`,
+  `nix develop -c cargo clippy --workspace --all-targets -- -D warnings`.
 - Format with `nix fmt`.
 - Public repository: no host names, domains, addresses or keys of any deployment.
 - Code, comments, docs and commits in English.

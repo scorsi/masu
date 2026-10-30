@@ -33,6 +33,6 @@ Plus the open day (≈ 85 MB) and the free-space reserve (2 GiB).
 
 ## Memory and CPU
 
-`masu serve` ≤ 64 MiB RSS in the archive phase (`MemoryMax=128M`); the seal streams through
+`masu-store serve` ≤ 64 MiB RSS in the archive phase (`MemoryMax=128M`); the seal streams through
 libzstd level 9 (≈ 20 MB). CPU idle except the nightly seal (tens of seconds for 850 MB raw).
 The engine phase gets its own budget.

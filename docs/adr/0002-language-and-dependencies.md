@@ -40,5 +40,5 @@ hand-written, as kekkai. Own logs are JSON lines in nisshi's schema written thro
 
 ## Consequences
 
-- One static binary per platform; the engine phase adds no runtime.
+- Static binaries per platform (ADR 0012); the engine phase adds no runtime.
 - The archive phase is more code than in Go; accepted for one language across both phases.

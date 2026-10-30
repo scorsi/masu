@@ -6,7 +6,7 @@ the engine phase gets its own ADRs and milestones when it starts.
 
 ## M0 — Convention and validator
 
-- Repository on Forgejo with GitHub mirror; flake (flake-parts, treefmt, crane); `Cargo.toml`
+- Repository on Forgejo with GitHub mirror; flake (flake-parts, treefmt, crane); Cargo workspace
   limited to ADR 0002; `proto/` with `buf` (Rust generated at build time by `prost-build`, as
   in kekkai).
 - Exposition parser (Prometheus text 0.0.4, OpenMetrics 1.0 text) and
@@ -22,7 +22,7 @@ the engine phase gets its own ADRs and milestones when it starts.
 
 ## M1 — Archive
 
-- `masu serve`: config TOML, unknown keys rejected (`listen`, `listen_metrics`, `data_dir`, `tls.cert_file`,
+- `masu-store serve` (ADR 0012): config TOML, unknown keys rejected (`listen`, `listen_metrics`, `data_dir`, `tls.cert_file`,
   `tls.key_file`, `tokens` = map hex SHA-256 → identity, `retention_days` (400, `0` = keep),
   `disk_reserve`).
 - `POST /v1/push` with the table of ADR 0003, `GET /v1/status`, own `/metrics` on loopback.
