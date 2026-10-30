@@ -7,7 +7,7 @@ Status: Accepted — 2026-10-30 (owner decision)
 One `masu` binary validated `/metrics` expositions, read and verified stores, and ran the store
 server from a configuration file. Other repositories call the validator in their tests
 (`lib.validateMetrics`), operators call `read` and `verify` on a store or a backup, and a query
-daemon for yagura and hanshou will read the same files with its own configuration. A binary
+daemon for yagura and hansho will read the same files with its own configuration. A binary
 that mixes data tools with a server's configuration grows options that only one of its uses
 needs. nisshi made the same split (nisshi ADR 0016).
 

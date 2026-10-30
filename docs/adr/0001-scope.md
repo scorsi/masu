@@ -7,7 +7,7 @@ Status: Accepted — 2026-10-19
 Nothing is stored today. A baseline cannot be rebuilt afterwards, so collection must start
 before any query engine exists. The time-series engine (Gorilla-style compression,
 downsampling, range queries) is a learning goal of its own and deserves time; dashboards
-([yagura](../../../yagura)) and alert rules ([hanshou](../../../hanshou)) will query it later.
+([yagura](../../../yagura)) and alert rules ([hansho](../../../hansho)) will query it later.
 Logs live in [nisshi](../../../nisshi), with no shared code.
 
 ## Options considered

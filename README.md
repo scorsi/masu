@@ -17,7 +17,7 @@ against.*
   **metric convention** and `masu validate`.
 - **Later** (own milestones, not in the minimal base): the time-series engine (Gorilla-style
   blocks, downsampling, range queries) built from the raw archive, and a query API for
-  [yagura](../yagura) and [hanshou](../hanshou).
+  [yagura](../yagura) and [hansho](../hansho).
 
 ## Binaries
 
@@ -57,7 +57,7 @@ never as a live probe. A silent agent keeps showing its last, possibly healthy, 
 |---|---|---|
 | fed by | hikyaku | `masu.v1` ingestion API |
 | convention used by | every house service | `/metrics` on loopback, `masu validate` in their tests |
-| read by | yagura, hanshou, kenbun (later) | the raw archive now, a query API later |
+| read by | yagura, hansho, kenbun (later) | the raw archive now, a query API later |
 
 ## Conventions
 
