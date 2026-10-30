@@ -124,7 +124,7 @@
                 common
                 // {
                   inherit cargoArtifacts;
-                  cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+                  cargoClippyExtraArgs = "--workspace --all-targets -- --deny warnings";
                 }
               );
               # Every line of fixtures/records/records.ndjson through masu's record validation:
@@ -134,7 +134,7 @@
                 // {
                   inherit cargoArtifacts;
                   pname = "masu-records-fixtures";
-                  cargoTestExtraArgs = "--test records";
+                  cargoTestExtraArgs = "-p masu-core --test records";
                 }
               );
 

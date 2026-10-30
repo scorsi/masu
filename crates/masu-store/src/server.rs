@@ -1,15 +1,15 @@
-//! `masu serve`: the HTTPS ingestion API (ADR 0003, 0007), `/v1/status` (ADR 0008) and the
+//! `masu-store serve`: the HTTPS ingestion API (ADR 0003, 0007), `/v1/status` (ADR 0008) and the
 //! loopback `/metrics` listener, over hyper and rustls (ADR 0002).
 
 use crate::config::{Config, Identity};
-use crate::metrics::Metrics;
-use crate::pb::{PushRejected, PushRequest, PushResponse};
-use crate::store::{Reply, Store};
 use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use masu_core::metrics::Metrics;
+use masu_core::pb::{PushRejected, PushRequest, PushResponse};
+use masu_core::store::{Reply, Store};
 use prost::Message;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -32,7 +32,7 @@ pub const MAX_COMPRESSED: usize = 8 << 20;
 pub const MAX_DECOMPRESSED: usize = 64 << 20;
 /// More records than 64 MiB of valid ones can hold (each at least `MIN_RECORD_BYTES` plus 3
 /// bytes of protobuf framing) is a body too large (413), refused before prost allocates them.
-const MAX_RECORDS: usize = MAX_DECOMPRESSED / (crate::record::MIN_RECORD_BYTES + 3);
+const MAX_RECORDS: usize = MAX_DECOMPRESSED / (masu_core::record::MIN_RECORD_BYTES + 3);
 /// Transport frames: zstd window at most 8 MiB, refused before the decoder allocates it.
 const WINDOW_LOG_MAX: u32 = 23;
 /// Pushes in flight (body, decode, commit), the seal included: one keeps the worst case
@@ -198,7 +198,7 @@ fn refuse(path: &str, id: Option<Identity>) -> Response<Full> {
         None => (StatusCode::UNAUTHORIZED, "no or bad credentials"),
         Some(_) => (StatusCode::FORBIDDEN, "identity lacks the role"),
     };
-    crate::log::warn("auth-failed", msg, serde_json::json!({"path": path}));
+    masu_core::log::warn("auth-failed", msg, serde_json::json!({"path": path}));
     respond(status, "text/plain", Vec::new())
 }
 
@@ -295,7 +295,7 @@ async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
             record_index,
             reason,
         } => {
-            crate::log::warn(
+            masu_core::log::warn(
                 "push-rejected",
                 &reason,
                 serde_json::json!({"record_index": record_index}),
@@ -303,15 +303,15 @@ async fn push(app: &Arc<App>, req: Request<Incoming>) -> Response<Full> {
             rejected(record_index, &reason)
         }
         Reply::Forbidden(reason) => {
-            crate::log::warn("push-rejected", &reason, serde_json::json!({"code": 403}));
+            masu_core::log::warn("push-rejected", &reason, serde_json::json!({"code": 403}));
             rejected_with(StatusCode::FORBIDDEN, None, &reason)
         }
         Reply::Insufficient(err) => {
-            crate::log::error("push-failed", &err, serde_json::json!({}));
+            masu_core::log::error("push-failed", &err, serde_json::json!({}));
             respond(StatusCode::INSUFFICIENT_STORAGE, "text/plain", Vec::new())
         }
         Reply::Unavailable(err) => {
-            crate::log::error("push-failed", &err, serde_json::json!({}));
+            masu_core::log::error("push-failed", &err, serde_json::json!({}));
             respond(StatusCode::SERVICE_UNAVAILABLE, "text/plain", Vec::new())
         }
     }
@@ -393,7 +393,9 @@ fn status_body(app: &App) -> Vec<u8> {
                 )
             })
             .collect(),
-        disk_free_bytes: crate::disk::free_bytes(&app.root).unwrap_or(0).to_string(),
+        disk_free_bytes: masu_core::disk::free_bytes(&app.root)
+            .unwrap_or(0)
+            .to_string(),
         disk_reserve_bytes: app.disk_reserve.to_string(),
     };
     serde_json::to_vec(&body).unwrap()
@@ -432,7 +434,7 @@ pub async fn metrics_handle(
     Ok(match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") => {
             let root = app.root.clone();
-            let free = tokio::task::spawn_blocking(move || crate::disk::free_bytes(&root))
+            let free = tokio::task::spawn_blocking(move || masu_core::disk::free_bytes(&root))
                 .await
                 .ok()
                 .and_then(Result::ok)
@@ -510,18 +512,18 @@ fn notify_ready() {
         None => sock.send_to(b"READY=1", &path),
     };
     if let Err(e) = result {
-        crate::log::warn("sd-notify", &e.to_string(), serde_json::json!({}));
+        masu_core::log::warn("sd-notify", &e.to_string(), serde_json::json!({}));
     }
 }
 
 /// Seconds until the next 00:10 UTC.
 fn until_seal(now_ns: i64) -> u64 {
-    let sod = (now_ns / crate::time::NS).rem_euclid(crate::time::DAY_SECS);
+    let sod = (now_ns / masu_core::time::NS).rem_euclid(masu_core::time::DAY_SECS);
     let target = 10 * 60;
     (if sod < target {
         target - sod
     } else {
-        crate::time::DAY_SECS - sod + target
+        masu_core::time::DAY_SECS - sod + target
     }) as u64
 }
 
@@ -554,23 +556,26 @@ pub fn serve(cfg: Config) -> Result<(), String> {
                     let (tls, app) = (tls.clone(), app.clone());
                     tokio::spawn(async move {
                         let _permit = permit;
-                        let stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, tls.accept(tcp))
-                            .await
-                        {
-                            Ok(Ok(s)) => s,
-                            Ok(Err(e)) => {
-                                crate::log::warn(
-                                    "tls-handshake",
-                                    &e.to_string(),
-                                    serde_json::json!({}),
-                                );
-                                return;
-                            }
-                            Err(_) => {
-                                crate::log::warn("tls-handshake", "timeout", serde_json::json!({}));
-                                return;
-                            }
-                        };
+                        let stream =
+                            match tokio::time::timeout(HANDSHAKE_TIMEOUT, tls.accept(tcp)).await {
+                                Ok(Ok(s)) => s,
+                                Ok(Err(e)) => {
+                                    masu_core::log::warn(
+                                        "tls-handshake",
+                                        &e.to_string(),
+                                        serde_json::json!({}),
+                                    );
+                                    return;
+                                }
+                                Err(_) => {
+                                    masu_core::log::warn(
+                                        "tls-handshake",
+                                        "timeout",
+                                        serde_json::json!({}),
+                                    );
+                                    return;
+                                }
+                            };
                         serve_connection(stream, app).await;
                     });
                 }
@@ -611,17 +616,17 @@ pub fn serve(cfg: Config) -> Result<(), String> {
                 let permit = work.clone().acquire_owned().await.unwrap();
                 let _ = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    crate::seal::run(&store, retention_days)
+                    masu_core::seal::run(&store, retention_days)
                 })
                 .await;
                 tokio::time::sleep(std::time::Duration::from_secs(until_seal(
-                    crate::time::now_ns(),
+                    masu_core::time::now_ns(),
                 )))
                 .await;
             }
         });
 
-        crate::log::info(
+        masu_core::log::info(
             "serve-start",
             serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "listen": cfg.listen}),
         );
@@ -632,7 +637,7 @@ pub fn serve(cfg: Config) -> Result<(), String> {
             _ = term.recv() => {}
             _ = tokio::signal::ctrl_c() => {}
         }
-        crate::log::info("serve-stop", serde_json::json!({}));
+        masu_core::log::info("serve-stop", serde_json::json!({}));
         Ok(())
     })
 }
@@ -640,6 +645,18 @@ pub fn serve(cfg: Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As masu-core's `store::tests` helpers, which are not visible from this crate.
+    fn tempdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("masu-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn open(root: &std::path::Path) -> Store {
+        Store::open(root, 0, Arc::new(Metrics::new())).unwrap()
+    }
 
     #[test]
     fn auth_codes() {
@@ -677,7 +694,7 @@ mod tests {
 
     #[test]
     fn seal_schedule() {
-        let ns = |s: &str| crate::time::parse_ns(s).unwrap();
+        let ns = |s: &str| masu_core::time::parse_ns(s).unwrap();
         assert_eq!(until_seal(ns("2026-10-19T00:00:00.000000000Z")), 600);
         assert_eq!(until_seal(ns("2026-10-19T00:10:00.000000000Z")), 86_400);
         assert_eq!(until_seal(ns("2026-10-19T23:59:50.000000000Z")), 610);
@@ -745,9 +762,9 @@ mod tests {
     #[tokio::test]
     async fn slow_clients_time_out() {
         use std::io::Write;
-        let root = crate::store::tests::tempdir("slow");
-        let store = Arc::new(Mutex::new(crate::store::tests::open(&root)));
-        let hash = crate::store::hex(&Sha256::digest(b"t"));
+        let root = tempdir("slow");
+        let store = Arc::new(Mutex::new(open(&root)));
+        let hash = masu_core::store::hex(&Sha256::digest(b"t"));
         let cfg = Config::parse(&format!(
             "listen = [\"x\"]\ndata_dir = \"{}\"\n[tls]\ncert_file = \"c\"\nkey_file = \"k\"\n[tokens]\n\"{hash}\" = \"node:node-a\"\n",
             root.display()
@@ -802,9 +819,9 @@ mod tests {
     #[tokio::test]
     async fn push_admission_deadline() {
         use std::io::Write;
-        let root = crate::store::tests::tempdir("admit");
-        let store = Arc::new(Mutex::new(crate::store::tests::open(&root)));
-        let hash = crate::store::hex(&Sha256::digest(b"t"));
+        let root = tempdir("admit");
+        let store = Arc::new(Mutex::new(open(&root)));
+        let hash = masu_core::store::hex(&Sha256::digest(b"t"));
         let cfg = Config::parse(&format!(
             "listen = [\"x\"]\ndata_dir = \"{}\"\n[tls]\ncert_file = \"c\"\nkey_file = \"k\"\n[tokens]\n\"{hash}\" = \"node:node-a\"\n",
             root.display()

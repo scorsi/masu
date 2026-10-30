@@ -1,4 +1,4 @@
-//! `masu serve` configuration: the TOML the NixOS module renders with `pkgs.formats.toml`
+//! `masu-store serve` configuration: the TOML the NixOS module renders with `pkgs.formats.toml`
 //! (milestone M1, ADR 0002: `deny_unknown_fields`).
 
 use serde::Deserialize;
@@ -42,7 +42,7 @@ impl<'de> Deserialize<'de> for Identity {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         match s.strip_prefix("node:") {
-            Some(node) if crate::record::is_node(node) => Ok(Identity::Node(node.into())),
+            Some(node) if masu_core::record::is_node(node) => Ok(Identity::Node(node.into())),
             None if s == "reader" => Ok(Identity::Reader),
             _ => Err(serde::de::Error::custom(format!(
                 "identity `{s}`: expected `node:<name>` or `reader`"

@@ -1,7 +1,8 @@
-# `services.masu` (milestone M1): renders the TOML of `masu serve` with pkgs.formats.toml,
-# checks it at build time (`masu check-config`: unknown keys fail the build), and runs
-# masu.service as the static user `masu`, `Type=notify`, `MemoryMax=128M`, TLS files through
-# `LoadCredential`, hardening as genkan. Opens no firewall port.
+# `services.masu` (milestone M1): renders the TOML of `masu-store serve` with
+# pkgs.formats.toml, checks it at build time (`masu-store check-config`, ADR 0012: unknown keys
+# fail the build), and runs masu.service as the static user `masu`, `Type=notify`,
+# `MemoryMax=128M`, TLS files through `LoadCredential`, hardening as genkan. Opens no firewall
+# port.
 {
   config,
   lib,
@@ -12,7 +13,7 @@ let
   inherit (lib) mkOption types;
   cfg = config.services.masu;
   toml = pkgs.formats.toml { };
-  exe = lib.getExe cfg.package;
+  exe = "${cfg.package}/bin/masu-store";
   credentials = "/run/credentials/masu.service";
 
   settings = {

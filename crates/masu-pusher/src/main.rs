@@ -1,4 +1,4 @@
-//! Test pusher (ADR 0009, test-only binary behind the `pusher` feature): runs one scenario of
+//! Test pusher (ADR 0009, test-only crate, not shipped): runs one scenario of
 //! docs/delivery-scenarios.md, or every line of fixtures/records/records.ndjson, against a
 //! running masu, and exits non-zero on the first failed expectation.
 //!
@@ -12,21 +12,24 @@
 //!
 //! `--restart`, `--fill` and `--free` are run with `sh -c` for the `restart` and `disk` steps.
 
+use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HOST};
 use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
-use masu::pb::{AgentStatus, PushRejected, PushRequest, PushResponse};
-use masu::server::{Full, read_body};
-use masu::store::hex;
-use masu::time;
+use masu_core::pb::{AgentStatus, PushRejected, PushRequest, PushResponse};
+use masu_core::store::hex;
+use masu_core::time;
 use prost::Message;
 use prost::bytes::Bytes;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -128,6 +131,49 @@ impl Client {
     }
 }
 
+/// A one-chunk request body, as masu-store's (no `http-body-util` in ADR 0002).
+struct Full(Option<Bytes>);
+
+impl From<Vec<u8>> for Full {
+    fn from(v: Vec<u8>) -> Full {
+        Full(Some(Bytes::from(v)))
+    }
+}
+
+impl Body for Full {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        Poll::Ready(self.get_mut().0.take().map(|b| Ok(Frame::data(b))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.is_none()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.0.as_ref().map_or(0, |b| b.len() as u64))
+    }
+}
+
+/// Collects a response body, `Err(())` past `limit` bytes or on a transport error.
+async fn read_body(mut body: Incoming, limit: usize) -> Result<Vec<u8>, ()> {
+    let mut out = Vec::new();
+    while let Some(frame) = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+        if let Ok(data) = frame.map_err(|_| ())?.into_data() {
+            if out.len() + data.len() > limit {
+                return Err(());
+            }
+            out.extend_from_slice(&data);
+        }
+    }
+    Ok(out)
+}
+
 async fn send<I>(io: TokioIo<I>, req: Request<Full>) -> (StatusCode, Vec<u8>)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -215,7 +261,7 @@ fn stored(
     let mut seen = HashSet::new();
     let mut duplicates = 0;
     let dir = PathBuf::from(data_dir).join("archive").join(node);
-    for file in masu::store::read_dir_sorted(&dir).unwrap() {
+    for file in masu_core::store::read_dir_sorted(&dir).unwrap() {
         let name = file.file_name().unwrap().to_str().unwrap();
         let Some(day) = name.strip_suffix(".ndjson.zst") else {
             continue;
@@ -224,7 +270,7 @@ fn stored(
         for line in bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
             let v: Value = serde_json::from_slice(line).unwrap();
             let recv_ts = v["recv_ts"].as_str().expect("recv_ts");
-            assert!(masu::record::is_timestamp(recv_ts), "recv_ts format");
+            assert!(masu_core::record::is_timestamp(recv_ts), "recv_ts format");
             assert_eq!(&recv_ts[..10], day, "recv_ts day is the file's day");
             let member = format!(",\"recv_ts\":\"{recv_ts}\"}}");
             let original = [

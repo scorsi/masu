@@ -1,0 +1,8 @@
+[package]
+name = "masu"
+version.workspace = true
+edition.workspace = true
+description = "masu data CLI: validate, read, verify"
+
+[dependencies]
+masu-core.workspace = true

@@ -1,14 +1,18 @@
-[package]
-name = "masu"
+[workspace]
+resolver = "3"
+members = ["crates/masu-core", "crates/masu", "crates/masu-store", "crates/masu-pusher"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Metric store: raw scrape archive and the metric convention"
 
 # Direct dependencies are limited to ADR 0002.
-[dependencies]
+[workspace.dependencies]
+masu-core = { path = "crates/masu-core" }
 hyper = { version = "1", features = ["server", "http1", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 prost = "0.13"
+prost-build = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
@@ -18,20 +22,3 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "time", "si
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 toml = "1"
 zstd = "0.14"
-
-[build-dependencies]
-prost-build = "0.13"
-
-
-[features]
-# The test pusher of ADR 0009 (docs/delivery-scenarios.md): not shipped in the package.
-pusher = []
-
-[[bin]]
-name = "masu"
-path = "src/main.rs"
-
-[[bin]]
-name = "masu-pusher"
-path = "src/pusher.rs"
-required-features = ["pusher"]

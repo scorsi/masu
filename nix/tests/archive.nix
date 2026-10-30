@@ -171,6 +171,6 @@ pkgs.testers.runNixOSTest {
         show = machine.succeed("systemctl show masu.service -p MemoryMax -p User -p Type -p ProtectSystem -p NoNewPrivileges")
         for p in ["MemoryMax=134217728", "User=masu", "Type=notify", "ProtectSystem=strict", "NoNewPrivileges=yes"]:
             assert p in show, show
-        assert machine.succeed("ps -o user= -C masu").strip() == "masu"
+        assert machine.succeed("ps -o user= -C masu-store").strip() == "masu"
   '';
 }

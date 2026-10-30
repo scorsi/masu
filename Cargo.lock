@@ -304,10 +304,45 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 name = "masu"
 version = "0.1.0"
 dependencies = [
- "hyper",
- "hyper-util",
+ "masu-core",
+]
+
+[[package]]
+name = "masu-core"
+version = "0.1.0"
+dependencies = [
  "prost",
  "prost-build",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zstd",
+]
+
+[[package]]
+name = "masu-pusher"
+version = "0.1.0"
+dependencies = [
+ "hyper",
+ "hyper-util",
+ "masu-core",
+ "prost",
+ "rustls",
+ "rustls-pemfile",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "zstd",
+]
+
+[[package]]
+name = "masu-store"
+version = "0.1.0"
+dependencies = [
+ "hyper",
+ "hyper-util",
+ "masu-core",
+ "prost",
  "rustls",
  "rustls-pemfile",
  "serde",

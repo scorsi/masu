@@ -1,0 +1,15 @@
+[package]
+name = "masu-core"
+version.workspace = true
+edition.workspace = true
+description = "masu's storage format, metric convention, scrape-record rules, commit, seal, read and verify"
+
+[dependencies]
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zstd.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true

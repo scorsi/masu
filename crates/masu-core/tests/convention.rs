@@ -1,12 +1,12 @@
 //! `masu validate` against the fixtures and the convention's own examples (ADR 0005, 0009).
 
-use masu::convention::{self, Rule};
-use masu::exposition::{self, Format};
+use masu_core::convention::{self, Rule};
+use masu_core::exposition::{self, Format};
 use std::path::{Path, PathBuf};
 
 fn fixtures(dir: &str) -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/metrics")
+        .join("../../fixtures/metrics")
         .join(dir);
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
@@ -84,7 +84,7 @@ fn node_exporter_scrape() {
 /// value 0), and the `nisshi_…` placeholder is skipped.
 #[test]
 fn convention_examples_pass() {
-    let doc = include_str!("../docs/metric-convention.md");
+    let doc = include_str!("../../../docs/metric-convention.md");
     let blocks: Vec<&str> = doc.split("```").skip(1).step_by(2).collect();
     assert!(blocks.len() >= 5, "examples not found");
     for block in blocks {

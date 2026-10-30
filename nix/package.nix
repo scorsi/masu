@@ -1,5 +1,6 @@
-# The masu binary, built by crane. build.rs compiles proto/ with prost-build, which needs protoc.
-# `passthru.pusher` is the test pusher of ADR 0009 (feature `pusher`), for the nixosTests only.
+# The masu workspace built by crane: the data CLI `masu` and the datastore `masu-store`
+# (ADR 0012) in one package. build.rs compiles proto/ with prost-build, which needs protoc.
+# `passthru.pusher` is the test pusher of ADR 0009, for the nixosTests only.
 {
   lib,
   protobuf,
@@ -8,7 +9,7 @@
 let
   common = {
     pname = "masu";
-    version = (lib.importTOML ../Cargo.toml).package.version;
+    version = (lib.importTOML ../Cargo.toml).workspace.package.version;
     strictDeps = true;
     nativeBuildInputs = [ protobuf ];
     PROTOC = "${protobuf}/bin/protoc";
@@ -29,6 +30,7 @@ craneLib.buildPackage (
   common
   // {
     inherit cargoArtifacts;
+    cargoExtraArgs = "--locked -p masu -p masu-store";
     doCheck = false; # the tests run in checks.cargo-test
     meta.mainProgram = "masu";
     passthru = {
@@ -38,7 +40,7 @@ craneLib.buildPackage (
         // {
           inherit cargoArtifacts;
           pname = "masu-pusher";
-          cargoExtraArgs = "--features pusher --bin masu-pusher";
+          cargoExtraArgs = "--locked -p masu-pusher";
           doCheck = false;
           meta.mainProgram = "masu-pusher";
         }

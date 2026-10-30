@@ -1,7 +1,7 @@
 //! masu: metric store. The contracts other repositories test against (exposition parser, metric
-//! convention validator, scrape-record rules) and the archive (store, seal, read, server).
+//! convention validator, scrape-record rules) and the archive (store, seal, read, verify).
+//! Shared by the binaries `masu` (data CLI) and `masu-store` (ADR 0012).
 
-pub mod config;
 pub mod convention;
 pub mod disk;
 pub mod exposition;
@@ -10,7 +10,6 @@ pub mod metrics;
 pub mod read;
 pub mod record;
 pub mod seal;
-pub mod server;
 pub mod store;
 pub mod time;
 

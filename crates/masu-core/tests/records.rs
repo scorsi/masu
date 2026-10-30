@@ -1,8 +1,8 @@
 //! Every line of fixtures/records/records.ndjson through masu's record check: same verdict,
 //! same `PushRejected.reason` (ADR 0009; the line format is in fixtures/records/README.md).
 
-use masu::pb::PushRejected;
-use masu::record;
+use masu_core::pb::PushRejected;
+use masu_core::record;
 use prost::Message;
 use serde_json::Value;
 
@@ -60,7 +60,7 @@ fn base64_decodes() {
 
 #[test]
 fn records_fixtures() {
-    let file = include_str!("../fixtures/records/records.ndjson");
+    let file = include_str!("../../../fixtures/records/records.ndjson");
     let mut reasons = std::collections::BTreeSet::new();
     for (i, text) in file.lines().enumerate() {
         let line: Value = serde_json::from_str(text).unwrap();

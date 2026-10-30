@@ -1,0 +1,18 @@
+[package]
+name = "masu-pusher"
+version.workspace = true
+edition.workspace = true
+description = "Test pusher of the nixosTests (ADR 0009): not shipped"
+publish = false
+
+[dependencies]
+masu-core.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+prost.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+zstd.workspace = true
