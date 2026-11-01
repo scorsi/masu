@@ -2,7 +2,14 @@
 name = "masu"
 version.workspace = true
 edition.workspace = true
-description = "masu data CLI: validate, read, verify"
+description = "masu data CLI: metric validation and authenticated remote queries"
 
 [dependencies]
 masu-core.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+prost-types.workspace = true
+rustls-pemfile.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true

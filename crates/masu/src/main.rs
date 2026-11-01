@@ -1,17 +1,14 @@
-//! `masu`, the data CLI (ADR 0012): `validate` (M0), `read` and `verify` (M1). It reads no
-//! configuration; the datastore is `masu-store`.
+//! `masu`: metric validation and authenticated remote queries (ADR 0015).
+mod query;
 
 use masu_core::convention;
 use masu_core::exposition::Format;
-use masu_core::read::Query;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-const USAGE: &str = "usage: masu read <root> --node <name> [--service <s>] [--metric <name or prefix>] [--from <ts>] [--to <ts>] [--raw]
-       masu verify <root>
+const USAGE: &str = "usage: masu query --node <name> --service <name> --metric <name> [--label k=v] --from <time> --to <time> [--step <duration>] [--reduce last|min|max|avg|count] [--rate] [--json]
        masu validate --metrics <http://host:port/path | file>";
 /// Far above the agent's 2 MiB body cap; only guards memory.
 const MAX_RESPONSE_BYTES: u64 = 64 << 20;
@@ -20,70 +17,23 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["validate", "--metrics", target] => validate(target),
-        ["verify", root] => {
-            match masu_core::read::verify(Path::new(root), &mut std::io::stdout()) {
-                Ok(errors) if errors.is_empty() => ExitCode::SUCCESS,
-                Ok(_) => ExitCode::FAILURE,
-                Err(e) => {
-                    eprintln!("masu: {root}: {e}");
-                    ExitCode::from(2)
-                }
-            }
+        ["query", ref rest @ ..] => query::run(rest),
+        ["read", ..] => {
+            eprintln!(
+                "masu: direct reads moved to masu-store read --root <root>; use masu query for HTTPS queries"
+            );
+            ExitCode::from(2)
         }
-        ["read", root, ref rest @ ..] => read(root, rest),
+        ["verify", ..] => {
+            eprintln!("masu: verification moved to masu-store verify --root <root>");
+            ExitCode::from(2)
+        }
         ["--version"] => {
             println!("masu {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         _ => {
             eprintln!("{USAGE}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn read(root: &str, args: &[&str]) -> ExitCode {
-    let mut q = Query {
-        node: String::new(),
-        service: None,
-        metric: None,
-        from: None,
-        to: None,
-        raw: false,
-    };
-    let mut it = args.iter();
-    while let Some(flag) = it.next() {
-        if *flag == "--raw" {
-            q.raw = true;
-            continue;
-        }
-        let Some(value) = it.next() else {
-            eprintln!("{USAGE}");
-            return ExitCode::from(2);
-        };
-        let value = value.to_string();
-        match *flag {
-            "--node" => q.node = value,
-            "--service" => q.service = Some(value),
-            "--metric" => q.metric = Some(value),
-            "--from" => q.from = Some(value),
-            "--to" => q.to = Some(value),
-            _ => {
-                eprintln!("{USAGE}");
-                return ExitCode::from(2);
-            }
-        }
-    }
-    let ts_ok = |t: &Option<String>| t.as_deref().is_none_or(masu_core::record::is_timestamp);
-    if q.node.is_empty() || !ts_ok(&q.from) || !ts_ok(&q.to) {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    }
-    let mut out = std::io::BufWriter::new(std::io::stdout());
-    match masu_core::read::read(Path::new(root), &q, &mut out).and_then(|()| out.flush()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("masu: {root}: {e}");
             ExitCode::from(2)
         }
     }
