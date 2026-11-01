@@ -7,7 +7,7 @@ Enough to read or re-ingest masu's archive without masu's code. ADRs 0004 and 00
 ```
 <root>/
   FORMAT                              one line: "masu-archive 1"
-  state.json                          writer state (Commit); readers ignore it
+  state.json                          writer state (Commit); live query snapshots use committed lengths
   archive/<node>/<YYYY-MM-DD>.ndjson.zst
   archive/<node>/<YYYY-MM-DD>.manifest.json   present once the day is sealed
 ```
@@ -22,6 +22,20 @@ Enough to read or re-ingest masu's archive without masu's code. ADRs 0004 and 00
 - Decompressed: NDJSON, UTF-8, one record per line, each line ends with `\n`.
 - The open day may end with a partial frame while a write is in progress (never past its
   committed length in `state.json`, which always ends on a whole frame).
+
+The query snapshot library (ADR 0014) pins read-only file descriptors with a bounded view of
+state and manifests. Open files are read only to their state-recorded committed length;
+files absent from state and without a manifest contribute nothing. A concurrent seal may
+change compressed lengths, so an inconsistent snapshot is retried once, then refused.
+Retained manifests remain visible when their data file is missing, allowing a consumer to
+report incomplete coverage for the relevant range. No recovery or archive mutation runs
+through this reader. The current `masu read` command is unchanged; the query daemon and
+direct/remote CLI migration have not yet shipped.
+
+These primitives operate per node and per day, not as a multi-node evaluator. A caller may
+inspect a day's manifest before deciding to scan it. Visitors run while a file is decoded;
+its manifest hash is checked at the end. If scanning fails, discard every accumulated result
+for the affected query instead of exposing the visited prefix as a successful answer.
 
 ## Record
 

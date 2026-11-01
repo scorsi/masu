@@ -57,8 +57,11 @@ the engine phase gets its own ADRs and milestones when it starts.
 [ADR 0013](adr/0013-query-document.md) (the batched query contract shared with nisshi and
 nenpyo), [ADR 0014](adr/0014-masu-query.md) (`masu-query` operators, trust boundary, budgets)
 and [ADR 0015](adr/0015-remote-data-cli.md) (`masu query` over HTTPS, direct reads in
-`masu-store`) are **Accepted — 2026-11-01**, with implementation pending. They unblock
+`masu-store`) are **Accepted — 2026-11-01**, with implementation in progress. They unblock
 Yagura Y1 (latest backup timestamp, first charts) on bounded one-pass scans of the
 archive, behind the contract the engine serves later. ADR 0014 sequences the feature checks
-(`query-select`, `query-rate`, `query-snapshot`, `query-budgets`, `vm-query`); no tests, builds
-or deployment have been run for this documentation change.
+(`query-select`, `query-rate`, `query-snapshot`, `query-budgets`, `vm-query`).
+
+The first library slice implements the document codec, committed archive snapshots and
+request-wide budgets. Its focused checks are `query-document`, `query-snapshot` and
+`query-budgets`; it includes no evaluator, daemon, remote CLI or deployment.

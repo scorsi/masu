@@ -7,13 +7,14 @@ pub mod disk;
 pub mod exposition;
 pub mod log;
 pub mod metrics;
+pub mod query;
 pub mod read;
 pub mod record;
 pub mod seal;
 pub mod store;
 pub mod time;
 
-/// The ingestion API (ADR 0003), generated from `proto/masu/v1/ingest.proto` by build.rs.
+/// The ingestion and query documents (ADRs 0003/0013), generated from `proto/masu/v1/`.
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/masu.v1.rs"));
 }

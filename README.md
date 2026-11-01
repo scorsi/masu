@@ -28,7 +28,9 @@ Accepted ADRs [0013](docs/adr/0013-query-document.md) (the batched query documen
 with nisshi and nenpyo), [0014](docs/adr/0014-masu-query.md) (`masu-query` over bounded
 one-pass scans) and [0015](docs/adr/0015-remote-data-cli.md) (`masu query` over HTTPS,
 direct `read`/`verify` in `masu-store --root`) design the query daemon and the CLI split.
-Implementation is pending; today's commands above remain unchanged.
+The first library slice provides bounded protobuf/ProtoJSON documents, request budgets and
+read-only committed archive snapshots in `masu-core`. Evaluation, the query daemon and the
+remote CLI remain pending; today's commands above remain unchanged.
 
 ## Not its job
 
