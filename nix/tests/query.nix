@@ -96,11 +96,12 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl restart masu.service")
         machine.wait_for_open_port(9472)
 
-    def query(token="${common.tokens.reader}", body="${request}", content="application/json", path="/v1/query", method="POST", accept="application/json"):
+    def query(token="${common.tokens.reader}", body="${request}", content="application/json", path="/v1/query", method="POST", accept="application/json", expect=False):
         auth = f"-H 'Authorization: Bearer {token}'" if token else ""
+        expect_header = "-H 'Expect: 100-continue'" if expect else ""
         command = (
             "curl -sS --max-time 15 --cacert ${common.certs}/ca.pem -o /root/query-response -w '%{http_code}' "
-            f"-X {method} -H 'Content-Type: {content}' -H 'Accept: {accept}' {auth} "
+            f"-X {method} -H 'Content-Type: {content}' -H 'Accept: {accept}' {auth} {expect_header} "
             f"--data-binary @{body} https://localhost:9474{path}"
         )
         return machine.succeed(command).strip()
@@ -144,7 +145,8 @@ pkgs.testers.runNixOSTest {
         assert query(method="GET") == "405"
         assert query(content="text/plain") == "415"
         machine.succeed("head -c 65537 /dev/zero > /root/query-too-large")
-        assert query(body="/root/query-too-large") == "413"
+        # Request the header decision before transmitting the intentionally oversized body.
+        assert query(body="/root/query-too-large", expect=True) == "413"
         machine.succeed("printf '{' > /root/query-bad")
         assert query(body="/root/query-bad") == "400"
         machine.fail("curl -sS --max-time 5 https://localhost:9474/v1/query")
