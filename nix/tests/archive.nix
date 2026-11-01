@@ -150,7 +150,7 @@ pkgs.testers.runNixOSTest {
         ).strip()
         assert code == "403", code
         machine.succeed("curl -s http://127.0.0.1:9473/metrics | grep -x 'masu_push_requests_total{code=\"403\"} 1'")
-        machine.succeed("${masu} validate --metrics http://127.0.0.1:9473/metrics")
+        machine.succeed("${common.lib.getExe pkgs.masu} validate --metrics http://127.0.0.1:9473/metrics")
         machine.succeed("curl -s http://127.0.0.1:9473/metrics | grep -x 'masu_records_total{source_node=\"node-a\"} 5'")
 
     with subtest("retention deletes old data, keeps manifests"):
