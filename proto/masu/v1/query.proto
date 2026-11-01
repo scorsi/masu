@@ -1,0 +1,93 @@
+// ADRs 0013 and 0014: POST /v1/query, protobuf or ProtoJSON, identity reader.
+syntax = "proto3";
+
+package masu.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message QueryRequest {
+  Range range = 1;
+  map<string, Query> queries = 2;
+}
+message Range {
+  google.protobuf.Timestamp from = 1;
+  google.protobuf.Timestamp to = 2;
+}
+message QueryResponse {
+  map<string, QueryResult> results = 1;
+  Budget budget = 2;
+}
+message QueryResult {
+  oneof body {
+    SeriesFrame series = 1;
+    TableFrame table = 2;
+    CountsFrame counts = 3;
+    QueryError error = 4;
+  }
+  string cursor = 5;
+}
+message QueryError {
+  string reason = 1;
+  string message = 2;
+}
+message SeriesFrame { repeated Series series = 1; }
+message Series {
+  map<string, string> labels = 1;
+  google.protobuf.Timestamp start = 2;
+  google.protobuf.Duration step = 3;
+  repeated google.protobuf.Timestamp ts = 4;
+  repeated double values = 5;
+}
+message TableFrame { repeated google.protobuf.Struct rows = 1; }
+message CountsFrame {
+  google.protobuf.Timestamp start = 1;
+  google.protobuf.Duration step = 2;
+  repeated CountGroup groups = 3;
+}
+message CountGroup {
+  map<string, string> by = 1;
+  repeated uint64 counts = 2;
+}
+message Budget {
+  uint64 records_read = 1;
+  uint64 bytes_read = 2;
+  uint64 elapsed_ms = 3;
+}
+message Query {
+  oneof body {
+    SeriesQuery series = 1;
+    UpQuery up = 2;
+    DiscoverQuery discover = 3;
+  }
+}
+message SeriesQuery {
+  string node = 1;
+  string service = 2;
+  string name = 3;
+  map<string, string> labels = 4;
+  google.protobuf.Duration step = 5;
+  Reduce reduce = 6;
+  bool rate = 7;
+}
+// The accepted enum spellings are the ProtoJSON API; do not rename them for a style rule.
+enum Reduce {
+  REDUCE_UNSPECIFIED = 0;
+  LAST = 1;
+  MIN = 2;
+  MAX = 3;
+  AVG = 4;
+  COUNT = 5;
+}
+message UpQuery {
+  string node = 1;
+  string service = 2;
+  uint32 limit = 3;
+  string after = 4;
+}
+message DiscoverQuery {
+  string node = 1;
+  string service = 2;
+  string prefix = 3;
+}

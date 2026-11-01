@@ -4,6 +4,10 @@ modules:
 lint:
   use:
     - STANDARD
+  ignore_only:
+    # ADR 0014 accepted these enum spellings as the ProtoJSON contract.
+    ENUM_VALUE_PREFIX:
+      - masu/v1/query.proto
 breaking:
   use:
     - FILE
