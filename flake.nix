@@ -88,10 +88,37 @@
                 }
               ];
             };
+            clientModuleEval = moduleEval.extendModules {
+              modules = [
+                {
+                  services.masu.enable = lib.mkForce false;
+                  programs.masu = {
+                    enable = true;
+                    queryUrl = "https://metrics.example.test:9474";
+                    tokenFile = "/run/secrets/masu-reader";
+                    caFile = "/run/certs/ca.pem";
+                  };
+                }
+              ];
+            };
+            queryModuleEval = moduleEval.extendModules {
+              modules = [
+                {
+                  services.masu.enable = lib.mkForce false;
+                  services.masu.query = {
+                    enable = true;
+                    listen = [ "127.0.0.1:9474" ];
+                    tls.certFile = "/run/certs/query.pem";
+                    tls.keyFile = "/run/secrets/query-key";
+                  };
+                }
+              ];
+            };
             vmTests = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
               vm-delivery = import ./nix/tests/delivery.nix self { inherit pkgs; };
               vm-records = import ./nix/tests/records.nix self { inherit pkgs; };
               vm-archive = import ./nix/tests/archive.nix self { inherit pkgs; };
+              vm-query = import ./nix/tests/query.nix self { inherit pkgs; };
             };
           in
           {
@@ -108,6 +135,7 @@
             devShells.default = pkgs.mkShellNoCC {
               packages = with pkgs; [
                 cargo
+                openssl
                 rustc
                 rust-analyzer
                 clippy
@@ -167,6 +195,30 @@
                   cargoTestExtraArgs = "-p masu-core --lib --test query_rate --test query_evaluate query_rate";
                 }
               );
+              query-daemon = craneLib.cargoTest (
+                common
+                // {
+                  inherit cargoArtifacts;
+                  pname = "masu-query-daemon";
+                  cargoTestExtraArgs = "-p masu-query";
+                }
+              );
+              query-client = craneLib.cargoTest (
+                common
+                // {
+                  inherit cargoArtifacts;
+                  pname = "masu-query-client";
+                  cargoTestExtraArgs = "-p masu";
+                }
+              );
+              query-direct = craneLib.cargoTest (
+                common
+                // {
+                  inherit cargoArtifacts;
+                  pname = "masu-query-direct";
+                  cargoTestExtraArgs = "-p masu-core --lib read::tests";
+                }
+              );
               # Every line of fixtures/records/records.ndjson through masu's record validation:
               # verdict and exact PushRejected.reason (ADR 0009).
               records-fixtures = craneLib.cargoTest (
@@ -198,6 +250,26 @@
                 assert moduleEval.config.services.masu.metrics.listen == null;
                 pkgs.writeText "module-eval" (
                   builtins.unsafeDiscardStringContext moduleEval.config.system.build.toplevel.drvPath
+                );
+              module-client =
+                assert !(clientModuleEval.config.systemd.services ? masu);
+                assert !(clientModuleEval.config.systemd.services ? masu-query);
+                assert !(clientModuleEval.config.users.users ? masu);
+                assert clientModuleEval.config.environment.variables.MASU_TOKEN_FILE == "/run/secrets/masu-reader";
+                pkgs.writeText "module-client" (
+                  builtins.unsafeDiscardStringContext clientModuleEval.config.system.build.toplevel.drvPath
+                );
+              module-query =
+                let
+                  service = queryModuleEval.config.systemd.services.masu-query.serviceConfig;
+                in
+                assert !(queryModuleEval.config.systemd.services ? masu);
+                assert service.ReadOnlyPaths == [ "/var/lib/masu" ];
+                assert !(service ? StateDirectory);
+                assert !(service ? ReadWritePaths);
+                assert service.MemoryMax == "512M";
+                pkgs.writeText "module-query" (
+                  builtins.unsafeDiscardStringContext queryModuleEval.config.system.build.toplevel.drvPath
                 );
             }
             // vmTests;

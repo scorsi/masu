@@ -10,7 +10,8 @@ only the masu copy.
 `POST /v1/query` accepts `application/x-protobuf` or `application/json` (ProtoJSON) and returns
 the same encoding. HTTPS, HTTP/1.1, reader identity, certificate and hostname verification,
 no redirects, `Cache-Control: no-store`. Authentication precedes decoding; bodies and tokens
-are never logged. The core document codec implements no HTTP listener.
+are never logged. The HTTP listener lives in the separate `masu-query` daemon; the core
+codec and evaluator have no network access.
 
 A request has a required `range` (`from` inclusive, `to` exclusive, `from < to`) and 1–64
 named `queries`. Times are protobuf Timestamp values, JSON RFC 3339 strings with nanoseconds
@@ -37,7 +38,7 @@ operator, makes only that query unsupported. Its known prefix is never executabl
 malformed known query parameter is isolated as invalid-query. Unknown fields elsewhere in
 the envelope fail the request. Duplicate map keys fail the request, including duplicate JSON
 members in an unknown query. The codec distinguishes known, unsupported and invalid queries
-before an evaluator exists.
+before evaluation.
 
 The protobuf guard runs before prost: prost normally drops unknown fields and merges map
 entries. The guard checks known maps before those entries are collected. As a deliberately
@@ -65,8 +66,11 @@ Per-store budgets apply before allocating a complete result or sending a partial
 Masu currently bounds request and response documents at 64 KiB and 16 MiB, 64 named queries,
 and a 31-day range. An invalid or inverted range is invalid-request; exceeding the range
 budget is scan-limit. The core encoder bounds the serialized output before returning it;
-the decoder checks input length before parsing. The HTTP layer must also bound collection
-of incoming bytes; it is a later implementation slice.
+the decoder checks input length before parsing. The HTTP layer bounds collection of incoming
+bytes before decoding and authenticates the reader before collecting the body. Two work
+permits cover collection, evaluation and buffered response bytes until their last network
+consumer releases them. A query has a ten-second wall deadline; the connection also has a
+twenty-second ceiling for headers and output.
 
 The evaluator measures the selected response encoding exactly; response bytes count only
 returned output, once. A separate initial 128 MiB request-wide workspace reservation bounds

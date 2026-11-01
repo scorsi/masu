@@ -52,12 +52,12 @@ the engine phase gets its own ADRs and milestones when it starts.
 - **Done when**: nixosTest with a test CA standing in for hanko-ca: certificate accepted,
   expired or foreign certificate refused, token and certificate nodes side by side.
 
-## Planned — Query document, masu-query and remote CLI (before the engine)
+## Query document, masu-query and remote CLI (before the engine)
 
 [ADR 0013](adr/0013-query-document.md) (the batched query contract shared with nisshi and
 nenpyo), [ADR 0014](adr/0014-masu-query.md) (`masu-query` operators, trust boundary, budgets)
 and [ADR 0015](adr/0015-remote-data-cli.md) (`masu query` over HTTPS, direct reads in
-`masu-store`) are **Accepted — 2026-11-01**, with implementation in progress. They unblock
+`masu-store`) are **Accepted — 2026-11-01** and implemented. They unblock
 Yagura Y1 (latest backup timestamp, first charts) on bounded one-pass scans of the
 archive, behind the contract the engine serves later. ADR 0014 sequences the feature checks
 (`query-select`, `query-rate`, `query-snapshot`, `query-budgets`, `vm-query`).
@@ -67,4 +67,13 @@ and batched evaluation of series, reductions, counter rates, health and discover
 checks are `query-document`, `query-snapshot`, `query-budgets`, `query-select` and `query-rate`.
 The evaluator shares one archive traversal and exposition parse across matching queries;
 missing retained days affect only queries that need them, while integrity failures discard
-the batch. The daemon, remote CLI and deployment remain pending.
+the batch.
+
+`masu-query` exposes the reader-authenticated HTTPS endpoint under bounded admission, body,
+work and response lifetimes. `masu query` verifies TLS and validates a bounded response before
+writing output; query errors retain their distinct exit code. Direct read/verify move to
+`masu-store --root` over committed snapshots, with an offline shared lock and no recovery.
+`query-daemon`, `query-client`, `query-direct` and `vm-query` cover these paths. The Nix module
+provides an independent read-only query service and a client-only installation, checked by
+`module-query` and `module-client`. Existing archive/delivery checks exercise the migrated
+direct commands. Deployment and consumers in other repositories remain separate work.

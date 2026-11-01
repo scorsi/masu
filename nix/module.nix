@@ -38,6 +38,11 @@ let
     '';
 in
 {
+  imports = [
+    ./query.nix
+    ./client.nix
+  ];
+
   options.services.masu = {
     enable = lib.mkEnableOption "masu, the metric store";
     package = lib.mkPackageOption pkgs "masu" { };

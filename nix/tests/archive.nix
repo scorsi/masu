@@ -7,7 +7,7 @@ self:
 { pkgs, ... }:
 let
   common = import ./common.nix { inherit pkgs self; };
-  masu = common.lib.getExe pkgs.masu;
+  masu = "${pkgs.masu}/bin/masu-store";
   root = "/var/lib/masu";
   day1 = "${root}/archive/node-a/2026-10-19.ndjson.zst";
   day2 = "${root}/archive/node-a/2026-10-20.ndjson.zst";
@@ -118,7 +118,7 @@ pkgs.testers.runNixOSTest {
         assert zcat_jq("${day2}", "length", "-s") == "5"
         assert zcat_jq("${day2}", ".recv_ts[:10]").split() == ["2026-10-20"] * 5
         out = machine.succeed(
-            "${masu} read ${root} --node node-a --metric annai_queries_total"
+            "${masu} read --root ${root} --node node-a --metric annai_queries_total"
             " --from 2026-10-19T08:15:30.000000000Z --to 2026-10-19T08:16:30.000000000Z"
         )
         assert out == (
@@ -128,13 +128,13 @@ pkgs.testers.runNixOSTest {
         ), out
         # Across the sealed day and the open day (seq 24–27).
         out = machine.succeed(
-            "${masu} read ${root} --node node-a --service annai --metric annai_queries"
+            "${masu} read --root ${root} --node node-a --service annai --metric annai_queries"
             " --from 2026-10-19T08:26:00.000000000Z --to 2026-10-19T08:27:30.000000000Z"
         )
         assert [l.split()[-1] for l in out.splitlines()] == ["240", "250", "260", "270"], out
-        out = machine.succeed("${masu} read ${root} --node node-a --raw --from 2026-10-19T08:29:00.000000000Z")
+        out = machine.succeed("${masu} read --root ${root} --node node-a --raw --from 2026-10-19T08:29:00.000000000Z")
         assert out.count("\n") == 1 and out.startswith('{"v":1,') and '"seq":30,' in out, out
-        out = machine.succeed("${masu} verify ${root}")
+        out = machine.succeed("${masu} verify --root ${root}")
         assert "node-a/2026-10-19: ok (25 records)" in out and "node-a/2026-10-20: ok (5 records)" in out, out
 
     with subtest("status for the reader, 403 for a node, 401 without a token (ADR 0010); own metrics conform"):
@@ -158,7 +158,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds("test -f ${manifest2}")
         machine.wait_until_succeeds("test ! -e ${day1}")
         machine.succeed("test -f ${manifest1} && test -f ${day2}")
-        machine.succeed("${masu} verify ${root}")
+        machine.succeed("${masu} verify --root ${root}")
 
     with subtest("logs follow the schema; the unit is hardened"):
         lines = machine.succeed("journalctl _SYSTEMD_UNIT=masu.service -o cat")
