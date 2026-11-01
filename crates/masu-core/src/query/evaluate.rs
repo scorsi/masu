@@ -215,7 +215,7 @@ impl Prepared {
                 {
                     return Ok(p);
                 }
-                SeriesEvaluator::new(q.clone(), range.clone(), encoding).map(State::Series)
+                SeriesEvaluator::new(q.clone(), *range, encoding).map(State::Series)
             }
             Some(pb::query::Body::Up(q)) => {
                 p.node = q.node.clone();
