@@ -11,6 +11,7 @@ pub const MAX_RESPONSE_BYTES: u64 = 16 << 20;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    pub workspace_bytes: u64,
     pub metadata_bytes: u64,
     pub files: u64,
     pub directory_entries_per_node: u64,
@@ -25,6 +26,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            workspace_bytes: 128 << 20,
             metadata_bytes: 4 << 20,
             files: 1024,
             directory_entries_per_node: 4096,
@@ -40,6 +42,7 @@ impl Default for Limits {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Charge {
+    Workspace,
     Metadata,
     File,
     Compressed,
@@ -51,6 +54,7 @@ pub enum Charge {
 }
 #[derive(Default, Debug)]
 pub struct Usage {
+    pub workspace_bytes: u64,
     pub metadata_bytes: u64,
     pub files: u64,
     pub compressed_bytes: u64,
@@ -122,6 +126,11 @@ impl Budget {
     pub fn charge(&mut self, kind: Charge, amount: u64) -> Result<(), Error> {
         self.check()?;
         let (used, limit, error) = match kind {
+            Charge::Workspace => (
+                &mut self.usage.workspace_bytes,
+                self.limits.workspace_bytes,
+                Error::ScanLimit,
+            ),
             Charge::Metadata => (
                 &mut self.usage.metadata_bytes,
                 self.limits.metadata_bytes,
@@ -180,8 +189,12 @@ impl Budget {
         *n += 1;
         Ok(())
     }
+    pub fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+    }
     pub fn remaining(&self, kind: Charge) -> u64 {
         let (limit, used) = match kind {
+            Charge::Workspace => (self.limits.workspace_bytes, self.usage.workspace_bytes),
             Charge::Metadata => (self.limits.metadata_bytes, self.usage.metadata_bytes),
             Charge::Compressed => (self.limits.compressed_bytes, self.usage.compressed_bytes),
             Charge::Decompressed => (
@@ -205,6 +218,7 @@ mod tests {
     fn query_budgets_each_ceiling_and_sticky_refusal() {
         let limits = Limits::default();
         for (kind, ceiling) in [
+            (Charge::Workspace, limits.workspace_bytes),
             (Charge::Metadata, limits.metadata_bytes),
             (Charge::File, limits.files),
             (Charge::Compressed, limits.compressed_bytes),

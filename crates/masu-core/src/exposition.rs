@@ -311,7 +311,7 @@ fn token(s: &str) -> (&str, &str) {
     }
 }
 
-fn is_metric_name(s: &str) -> bool {
+pub(crate) fn is_metric_name(s: &str) -> bool {
     let mut chars = s.chars();
     chars
         .next()
@@ -319,7 +319,7 @@ fn is_metric_name(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
-fn is_label_name(s: &str) -> bool {
+pub(crate) fn is_label_name(s: &str) -> bool {
     let mut chars = s.chars();
     chars
         .next()
