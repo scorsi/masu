@@ -2,6 +2,9 @@
 
 Status: Accepted — 2026-10-19
 
+Dashboard/engine coupling amended by [ADR 0014](0014-masu-query.md) on 2026-11-01:
+bounded archive queries may serve dashboards before the engine; implementation is pending.
+
 ## Context
 
 The archive must be readable without masu's code, lossless, and the source from which the

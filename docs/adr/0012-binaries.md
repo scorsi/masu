@@ -2,6 +2,9 @@
 
 Status: Accepted — 2026-10-30 (owner decision)
 
+CLI responsibilities superseded in part by [ADR 0015](0015-remote-data-cli.md) on
+2026-11-01. The migration is accepted but not implemented; the commands below still ship.
+
 ## Context
 
 One `masu` binary validated `/metrics` expositions, read and verified stores, and ran the store

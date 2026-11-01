@@ -28,6 +28,7 @@ Rust, built with crane. Direct dependencies:
 | `hyper` (`server`, `http1`), `hyper-util` | HTTP server (HTTP/1.1 only, ADR 0003 amendment) |
 | `rustls` (`ring` provider), `tokio-rustls`, `rustls-pemfile` | TLS, no C toolchain for crypto |
 | `prost` | ingestion API |
+| `prost-types` (approved by ADR 0013; implementation pending) | query protocol well-known types |
 | `zstd` (vendored libzstd) | archive files; mature encoder with numeric levels |
 | `serde` (`derive`), `serde_json` | records, manifests, state, status |
 | `toml` | configuration file, rendered by the module with `pkgs.formats.toml`, read with `#[serde(deny_unknown_fields)]` |

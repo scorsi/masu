@@ -51,3 +51,14 @@ the engine phase gets its own ADRs and milestones when it starts.
 - `auth.methods`, SPIFFE ID mapping (ADR 0007).
 - **Done when**: nixosTest with a test CA standing in for hanko-ca: certificate accepted,
   expired or foreign certificate refused, token and certificate nodes side by side.
+
+## Planned — Query document, masu-query and remote CLI (before the engine)
+
+[ADR 0013](adr/0013-query-document.md) (the batched query contract shared with nisshi and
+nenpyo), [ADR 0014](adr/0014-masu-query.md) (`masu-query` operators, trust boundary, budgets)
+and [ADR 0015](adr/0015-remote-data-cli.md) (`masu query` over HTTPS, direct reads in
+`masu-store`) are **Accepted — 2026-11-01**, with implementation pending. They unblock
+Yagura Y1 (latest backup timestamp, first charts) on bounded one-pass scans of the
+archive, behind the contract the engine serves later. ADR 0014 sequences the feature checks
+(`query-select`, `query-rate`, `query-snapshot`, `query-budgets`, `vm-query`); no tests, builds
+or deployment have been run for this documentation change.

@@ -17,3 +17,6 @@ Decision / Consequences. A decision is changed by a new ADR that supersedes the 
 | [0010](0010-forbidden-for-wrong-role.md) | 403 for a valid token without the role |
 | [0011](0011-stream-owner.md) | A stream belongs to the node that first pushed it |
 | [0012](0012-binaries.md) | Three binaries: data CLI, datastore, query daemon |
+| [0013](0013-query-document.md) | Query document: one batched request contract for the stores |
+| [0014](0014-masu-query.md) | masu-query: operators, trust boundary and budgets |
+| [0015](0015-remote-data-cli.md) | The data CLI queries the daemon; the datastore reads files |

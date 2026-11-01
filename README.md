@@ -24,6 +24,12 @@ against.*
 `masu` is the data CLI (`validate`, `read`, `verify`); `masu-store` is the datastore
 (`serve`, `check-config`, `--version`); both build on the `masu-core` library (ADR 0012).
 
+Accepted ADRs [0013](docs/adr/0013-query-document.md) (the batched query document shared
+with nisshi and nenpyo), [0014](docs/adr/0014-masu-query.md) (`masu-query` over bounded
+one-pass scans) and [0015](docs/adr/0015-remote-data-cli.md) (`masu query` over HTTPS,
+direct `read`/`verify` in `masu-store --root`) design the query daemon and the CLI split.
+Implementation is pending; today's commands above remain unchanged.
+
 ## Not its job
 
 Logs ([nisshi](../nisshi)), dashboards, alerting, host metrics ([mihari](../mihari)).
