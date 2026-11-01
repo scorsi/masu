@@ -34,7 +34,22 @@ pub struct Envelope {
 /// object, duplicate member, `recv_ts`, then the envelope fields in the order of
 /// storage-format.md, then `raw_b64`.
 pub fn check(record: &[u8]) -> Result<Envelope, String> {
-    if record.len() > MAX_PUSHED_BYTES {
+    check_record(record, false)
+}
+
+/// Stored records include the store-added receive timestamp; never validate them as pushes.
+pub(crate) fn check_stored(record: &[u8]) -> Result<Envelope, String> {
+    check_record(record, true)
+}
+
+fn check_record(record: &[u8], stored: bool) -> Result<Envelope, String> {
+    if record.len()
+        > if stored {
+            MAX_STORED_BYTES
+        } else {
+            MAX_PUSHED_BYTES
+        }
+    {
         return Err("record-too-large".into());
     }
     if std::str::from_utf8(record).is_err() {
@@ -61,7 +76,11 @@ pub fn check(record: &[u8]) -> Result<Envelope, String> {
     if let Ok(FirstDuplicate(Some(name))) = serde_json::from_slice(record) {
         return Err(format!("duplicate-field:{name}"));
     }
-    if obj.contains_key("recv_ts") {
+    if stored {
+        field(obj, "recv_ts", |v| {
+            v.as_str().and_then(crate::time::parse_ns)
+        })?;
+    } else if obj.contains_key("recv_ts") {
         return Err("reserved-field:recv_ts".into());
     }
     field(obj, "v", |v| v.as_u64().filter(|&n| n == 1))?;
