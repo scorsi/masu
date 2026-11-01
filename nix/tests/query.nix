@@ -169,7 +169,7 @@ pkgs.testers.runNixOSTest {
         return status, machine.succeed("cat /root/client-stdout"), machine.succeed("cat /root/client-stderr")
 
     with subtest("the installed remote CLI retains the direct renderer and supports reductions and rates"):
-        direct = machine.succeed("masu-store read --root /var/lib/masu --node node-a --service annai --metric annai_queries_total --from 2026-10-19T08:14:00Z --to 2026-10-19T08:28:00Z")
+        direct = machine.succeed("masu-store read --root /var/lib/masu --node node-a --service annai --metric annai_queries_total --from 2026-10-19T08:14:00.000000000Z --to 2026-10-19T08:28:00.000000000Z")
         code, output, error = cli()
         assert code == 0 and output == direct and len(output.splitlines()) == 25, (code, output, error)
         code, output, error = cli("--reduce last --label proto=udp")
