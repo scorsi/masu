@@ -2,6 +2,9 @@
 
 Status: Accepted — 2026-10-19
 
+CLI ownership superseded by [0015](0015-remote-data-cli.md): direct read/verify now use
+`masu-store ... --root`; the original reading/output semantics below are retained.
+
 Superseded in part by [0010](0010-forbidden-for-wrong-role.md) (403 for a valid token without the role).
 
 ## Decision

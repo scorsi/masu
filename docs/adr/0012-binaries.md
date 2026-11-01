@@ -3,7 +3,8 @@
 Status: Accepted — 2026-10-30 (owner decision)
 
 CLI responsibilities superseded in part by [ADR 0015](0015-remote-data-cli.md) on
-2026-11-01. The migration is accepted but not implemented; the commands below still ship.
+2026-11-01. The migration is implemented: `masu query` is remote; `masu-store read/verify
+--root` owns direct access. The original command ownership below is historical.
 
 ## Context
 

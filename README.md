@@ -7,31 +7,103 @@
 *枡 (masu): the wooden measuring box of Edo markets, the standard every quantity was measured
 against.*
 
-**Status:** M1 (archive: `masu-store serve`, seal and retention, `masu read`, `masu verify`,
-`services.masu`); mTLS is M2.
+**Status:** archive, bounded query daemon and remote data CLI implemented. The package ships
+`masu`, `masu-store` and `masu-query`; mTLS remains M2. No deployment is implied.
 
 ## Role
 
 - **Now**: ingestion API (`masu.v1`), raw scrape archive (zstd NDJSON, one file per node and
-  receive day), `masu read` (samples filtered by node, service, metric and time), the
-  **metric convention** and `masu validate`.
+  receive day), bounded batched series/health/discovery queries over HTTPS, direct
+  `masu-store read` exports, the **metric convention** and `masu validate`.
 - **Later** (own milestones, not in the minimal base): the time-series engine (Gorilla-style
-  blocks, downsampling, range queries) built from the raw archive, and a query API for
-  [yagura](../yagura) and [hansho](../hansho).
+  blocks) built from the raw archive, replacing bounded scans behind the same query contract
+  for [yagura](../yagura) and [hansho](../hansho).
 
 ## Binaries
 
-`masu` is the data CLI (`validate`, `read`, `verify`); `masu-store` is the datastore
-(`serve`, `check-config`, `--version`); both build on the `masu-core` library (ADR 0012).
+| Binary | Commands |
+|---|---|
+| `masu` | `validate --metrics`, authenticated HTTPS `query` |
+| `masu-store` | `serve`, `check-config`, direct `read --root`, `verify --root`, `--version` |
+| `masu-query` | read-only `serve`, `check-config`, `--version` |
 
-Accepted ADRs [0013](docs/adr/0013-query-document.md) (the batched query document shared
-with nisshi and nenpyo), [0014](docs/adr/0014-masu-query.md) (`masu-query` over bounded
-one-pass scans) and [0015](docs/adr/0015-remote-data-cli.md) (`masu query` over HTTPS,
-direct `read`/`verify` in `masu-store --root`) design the query daemon and the CLI split.
-The library provides bounded protobuf/ProtoJSON documents, request budgets, read-only
-committed archive snapshots and batched evaluation of series, reductions, rates, health and
-discovery in `masu-core`. The query daemon and remote CLI remain pending; today's commands
-above remain unchanged.
+ADRs [0013](docs/adr/0013-query-document.md), [0014](docs/adr/0014-masu-query.md) and
+[0015](docs/adr/0015-remote-data-cli.md) define the query document, operators and CLI split.
+The daemon accepts one bounded batch over `POST /v1/query`, protobuf or ProtoJSON. It reads
+committed archive snapshots once per relevant file, shares parsed scrapes across the batch,
+and evaluates raw/stepped series, reductions, rates, scrape health and discovery. See
+[the query contract](docs/query-document.md) for limits, paging and failure semantics.
+The engine, other stores' query daemons and Yagura consumers are separate work.
+
+## Remote queries
+
+The client needs an HTTPS **origin** (no credentials, path, query or fragment), a reader
+**token file**, and optionally a PEM CA file. Without `MASU_CA_FILE`, it uses
+`NIX_SSL_CERT_FILE`, then `SSL_CERT_FILE`, then the platform CA bundle. Both certificate
+chain and hostname are verified. Redirects are refused; there is no insecure mode.
+
+```sh
+export MASU_QUERY_URL=https://masu-query.example.test
+export MASU_TOKEN_FILE=/run/secrets/masu-reader
+export MASU_CA_FILE=/etc/masu-ca.pem
+masu query --node node-a --service azukari \
+  --metric azukari_last_snapshot_timestamp_seconds \
+  --from -1d --to -0s --reduce last
+```
+
+`--metric` is an exact sample name; repeated `--label key=value` flags are equality matchers
+(a series may have additional labels). Take actual metric names and labels from the
+exporter's contract. Times accept RFC 3339, including fractional seconds and UTC offsets,
+or negative integer offsets from one captured current time. Duration units are
+`ns`, `us`, `ms`, `s`, `m`, `h`, `d`; `--step` is a positive integer duration. `--from` is
+inclusive and `--to` exclusive. `--reduce last|min|max|avg|count` and `--rate` follow ADR 0014;
+`--rate` needs `--step` and cannot combine with `--reduce`.
+
+Text output is `ts node service series value`, sorted chronologically across series, with
+canonical label ordering and nine fractional UTC timestamp digits. Labels are escaped as in
+direct reads. `--json` prints the validated ProtoJSON response exactly as received. The
+response is bounded to 16 MiB before decoding; validation completes before stdout is written.
+HTTP/TLS/timeout/encoding/selection failures exit **2** with empty stdout. A per-query error
+inside HTTP 200 exits **3**: text stdout is empty; `--json` prints that validated error response.
+The connect/response deadline is ten seconds. Only series queries have CLI flags; batched
+health/discovery clients use the query document API.
+
+## Direct archive tools
+
+```sh
+masu-store read --root /var/lib/masu --node node-a --service annai \
+  --metric annai_queries --from 2026-11-01T00:00:00.000000000Z \
+  --to 2026-11-01T01:00:00.000000000Z
+masu-store read --root /path/to/restored-backup --node node-a --raw
+masu-store verify --root /path/to/restored-backup
+```
+
+Direct reads retain the previous optional flags, literal metric **prefix**, inclusive
+`--from`/`--to`, output ordering, failed/parse-error marker lines, and one-million-row limit.
+Their timestamps use the archive's nine-fractional-digit UTC form. `--raw` retains the stored
+NDJSON bytes (trailing whitespace normalized and LF appended), and ignores `--metric` as
+before. These export the retained files; manifest-only days removed by retention are skipped,
+whereas a query needing such a day returns `archive-incomplete`.
+
+Live reads and verification see committed prefixes, excluding complete or partial uncommitted
+tails. A restored root works without a server or `state.json`: a shared read-only FORMAT lock
+excludes an active writer/rebuild for the operation. No state is rebuilt and no file is
+truncated, recovered or otherwise repaired. Verification retains exit **0** for a sound
+archive, **1** for integrity errors and **2** when it cannot read the archive safely.
+`masu read` and `masu verify` now print command-specific migration help and exit 2.
+`masu validate --metrics` and `lib.validateMetrics` are unchanged.
+
+## NixOS query service and client
+
+`services.masu.query` is independent of `services.masu.enable`, so it can read a provisioned
+store root without starting its writer. Configure `enable`, `listen`, `dataDir`,
+`tls.certFile`, `tls.keyFile`, and token SHA-256 hashes in `tokens`. The service has read-only
+archive access and opens no firewall port.
+
+`programs.masu.enable` installs the package for client use, without enabling either daemon.
+Set `queryUrl`, `tokenFile`, and optional `caFile`; the module supplies the three environment
+variables above. Token values stay in files, not command arguments or Nix store values.
+No deployment or credential provisioning is performed by these options automatically.
 
 ## Not its job
 

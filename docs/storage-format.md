@@ -29,8 +29,11 @@ files absent from state and without a manifest contribute nothing. A concurrent 
 change compressed lengths, so an inconsistent snapshot is retried once, then refused.
 Retained manifests remain visible when their data file is missing, allowing a consumer to
 report incomplete coverage for the relevant range. No recovery or archive mutation runs
-through this reader. The current `masu read` command is unchanged; the query daemon and
-direct/remote CLI migration have not yet shipped.
+through this reader. `masu-store read` and `masu-store verify` use the same scanner; when
+state is absent, direct tools retain a shared read-only FORMAT lock for the whole operation,
+including an empty archive, to exclude an active writer/rebuild. No archive version changes.
+Direct exports cover retained data files; manifest-only retained history is not exported as
+records. The query daemon instead reports incomplete coverage to affected queries.
 
 These snapshot primitives operate per node and per day. The core batch evaluator combines
 them across selected nodes and shares each archive scan across matching queries. A caller may
