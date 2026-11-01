@@ -387,14 +387,13 @@ fn unknown_query(v: &Value) -> Result<bool> {
                 if pb::Reduce::from_str_name(name).is_none() {
                     return Ok(true);
                 }
-            } else if let Some(number) = reduce.as_i64() {
-                if i32::try_from(number)
+            } else if let Some(number) = reduce.as_i64()
+                && i32::try_from(number)
                     .ok()
                     .and_then(|n| pb::Reduce::try_from(n).ok())
                     .is_none()
-                {
-                    return Ok(true);
-                }
+            {
+                return Ok(true);
             }
         }
     }
