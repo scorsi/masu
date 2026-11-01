@@ -151,6 +151,22 @@
                   cargoTestExtraArgs = "-p masu-core --lib query::budget::tests";
                 }
               );
+              query-select = craneLib.cargoTest (
+                common
+                // {
+                  inherit cargoArtifacts;
+                  pname = "masu-query-select";
+                  cargoTestExtraArgs = "-p masu-core --lib --test query_evaluate query_select";
+                }
+              );
+              query-rate = craneLib.cargoTest (
+                common
+                // {
+                  inherit cargoArtifacts;
+                  pname = "masu-query-rate";
+                  cargoTestExtraArgs = "-p masu-core --lib --test query_rate --test query_evaluate query_rate";
+                }
+              );
               # Every line of fixtures/records/records.ndjson through masu's record validation:
               # verdict and exact PushRejected.reason (ADR 0009).
               records-fixtures = craneLib.cargoTest (

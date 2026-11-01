@@ -2,4 +2,5 @@
 
 pub mod budget;
 pub mod document;
+pub mod evaluate;
 pub mod snapshot;

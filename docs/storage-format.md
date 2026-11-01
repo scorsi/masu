@@ -32,7 +32,8 @@ report incomplete coverage for the relevant range. No recovery or archive mutati
 through this reader. The current `masu read` command is unchanged; the query daemon and
 direct/remote CLI migration have not yet shipped.
 
-These primitives operate per node and per day, not as a multi-node evaluator. A caller may
+These snapshot primitives operate per node and per day. The core batch evaluator combines
+them across selected nodes and shares each archive scan across matching queries. A caller may
 inspect a day's manifest before deciding to scan it. Visitors run while a file is decoded;
 its manifest hash is checked at the end. If scanning fails, discard every accumulated result
 for the affected query instead of exposing the visited prefix as a successful answer.

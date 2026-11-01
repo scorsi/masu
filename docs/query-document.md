@@ -68,6 +68,13 @@ budget is scan-limit. The core encoder bounds the serialized output before retur
 the decoder checks input length before parsing. The HTTP layer must also bound collection
 of incoming bytes; it is a later implementation slice.
 
+The evaluator measures the selected response encoding exactly; response bytes count only
+returned output, once. A separate initial 128 MiB request-wide workspace reservation bounds
+staged candidates, labels and result assembly before allocation. Exhausting this work guard
+is scan-limit even when a reduction would return a small response. It is distinct from the
+16 MiB serialized response ceiling. Integrity or request-wide budget failures discard the
+batch rather than exposing accumulated frames as successful results.
+
 ## Paging and evolution
 
 An operator may support `limit` and `after`. Its cursor is bound to the query filters and

@@ -62,6 +62,9 @@ Yagura Y1 (latest backup timestamp, first charts) on bounded one-pass scans of t
 archive, behind the contract the engine serves later. ADR 0014 sequences the feature checks
 (`query-select`, `query-rate`, `query-snapshot`, `query-budgets`, `vm-query`).
 
-The first library slice implements the document codec, committed archive snapshots and
-request-wide budgets. Its focused checks are `query-document`, `query-snapshot` and
-`query-budgets`; it includes no evaluator, daemon, remote CLI or deployment.
+The library implements the document codec, committed archive snapshots, request-wide budgets
+and batched evaluation of series, reductions, counter rates, health and discovery. Its focused
+checks are `query-document`, `query-snapshot`, `query-budgets`, `query-select` and `query-rate`.
+The evaluator shares one archive traversal and exposition parse across matching queries;
+missing retained days affect only queries that need them, while integrity failures discard
+the batch. The daemon, remote CLI and deployment remain pending.
