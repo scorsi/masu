@@ -1,0 +1,19 @@
+[package]
+name = "masu-query"
+version.workspace = true
+edition.workspace = true
+description = "masu's read-only HTTPS query daemon"
+
+[dependencies]
+masu-core.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+prost.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+toml.workspace = true
