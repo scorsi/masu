@@ -124,7 +124,7 @@ fn both_encodings_keep_nanoseconds_operators_and_enum_names() {
             assert!(std::str::from_utf8(&bytes).unwrap().contains("\"LAST\""));
         }
         let decoded = document::decode_request(&bytes, encoding).unwrap();
-        assert_eq!(decoded.range, q.range.clone().unwrap());
+        assert_eq!(decoded.range, q.range.unwrap());
         for (key, value) in q.queries.clone() {
             assert_eq!(
                 known(
@@ -318,7 +318,7 @@ fn response() -> pb::QueryResponse {
     let t = range().from.unwrap();
     let series = pb::Series {
         labels: std::collections::HashMap::from([("peer".into(), "n\"\\\n".into())]),
-        ts: vec![t.clone(); 4],
+        ts: vec![t; 4],
         values: vec![1.25, f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
         ..Default::default()
     };
