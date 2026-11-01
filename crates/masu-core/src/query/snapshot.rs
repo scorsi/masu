@@ -47,9 +47,43 @@ impl From<io::Error> for Error {
     }
 }
 
+/// Holds an offline root against a writer for a whole multi-node operation, even if empty.
+pub struct ReadGuard {
+    _lock: Option<File>,
+}
+impl ReadGuard {
+    pub fn acquire(root: &Path, budget: &mut Budget) -> Result<Self, Error> {
+        let state = root.join("state.json");
+        let first = metadata(&state, budget)?;
+        let lock = if first.is_none() {
+            budget.charge(Charge::File, 1)?;
+            let lock = File::open(root.join("FORMAT"))?;
+            lock.try_lock_shared().map_err(|_| Error::Unavailable)?;
+            Some(lock)
+        } else {
+            None
+        };
+        // A writer may have completed startup before the shared lock was acquired.
+        let bytes = if lock.is_some() {
+            metadata(&state, budget)?
+        } else {
+            first
+        };
+        if let Some(bytes) = bytes {
+            validate_json_keys(&bytes)?;
+            let state: State =
+                serde_json::from_slice(&bytes).map_err(|e| Error::Corrupt(e.to_string()))?;
+            if state.v != 1 {
+                return Err(Error::Corrupt("unsupported state version".into()));
+            }
+        }
+        Ok(Self { _lock: lock })
+    }
+}
 pub struct Snapshot {
     pub node: String,
     pub days: Vec<Day>,
+    _offline_lock: Option<ReadGuard>,
 }
 pub struct Day {
     pub day: String,
@@ -61,6 +95,15 @@ pub struct Day {
 impl Snapshot {
     pub fn capture(root: &Path, node: &str, budget: &mut Budget) -> Result<Self, Error> {
         capture_with(root, node, budget, &mut |_| {})
+    }
+    /// Direct tools may read a restored root with no state only while a shared FORMAT lock
+    /// proves that no writer is rebuilding it. The descriptor keeps that lock for the scan.
+    pub fn capture_for_read(root: &Path, node: &str, budget: &mut Budget) -> Result<Self, Error> {
+        let guard = ReadGuard::acquire(root, budget)?;
+        let offline = guard._lock.is_some();
+        let mut snapshot = capture_mode(root, node, budget, &mut |_| {}, offline)?;
+        snapshot._offline_lock = Some(guard);
+        Ok(snapshot)
     }
     /// Callers must discard accumulated results if scanning any required day fails.
     pub fn scan(
@@ -86,6 +129,14 @@ impl Day {
         budget: &mut Budget,
         mut visit: impl FnMut(&Value, &mut Budget) -> Result<(), Error>,
     ) -> Result<(), Error> {
+        self.scan_lines(budget, |value, _, budget| visit(value, budget))
+    }
+    /// Raw bytes are the validated stored line, LF included, before any JSON reserialization.
+    pub fn scan_lines(
+        &mut self,
+        budget: &mut Budget,
+        mut visit: impl FnMut(&Value, &[u8], &mut Budget) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         budget.check()?;
         if self.missing {
             return Err(Error::ArchiveIncomplete);
@@ -110,10 +161,13 @@ impl Day {
         let mut reader = BufReader::new(decoded);
         let mut scan = Scan::default();
         let mut line = Vec::new();
+        let mut record_no = 0u64;
         while crate::seal::next_line(&mut reader, &mut line).map_err(read_error)? {
             shared.borrow_mut().charge(Charge::Record, 1)?;
             let bytes = line.strip_suffix(b"\n").unwrap();
-            let envelope = record::check_stored(bytes).map_err(Error::Corrupt)?;
+            record_no += 1;
+            let envelope = record::check_stored(bytes)
+                .map_err(|e| Error::Corrupt(format!("record {record_no}: {e}")))?;
             if envelope.node != self.node {
                 return Err(Error::Corrupt("record node differs from directory".into()));
             }
@@ -124,7 +178,7 @@ impl Day {
                 ));
             }
             shared.borrow().check()?;
-            visit(&value, &mut shared.borrow_mut())?;
+            visit(&value, &line, &mut shared.borrow_mut())?;
             shared.borrow().check()?;
         }
         if let Some(want) = &self.manifest {
@@ -294,6 +348,15 @@ fn capture_with(
     budget: &mut Budget,
     hook: &mut impl FnMut(&str),
 ) -> Result<Snapshot, Error> {
+    capture_mode(root, node, budget, hook, false)
+}
+fn capture_mode(
+    root: &Path,
+    node: &str,
+    budget: &mut Budget,
+    hook: &mut impl FnMut(&str),
+    allow_offline: bool,
+) -> Result<Snapshot, Error> {
     if !record::is_node(node) {
         return Err(Error::Corrupt("invalid node".into()));
     }
@@ -301,7 +364,7 @@ fn capture_with(
         return Err(Error::Corrupt("missing or unsupported FORMAT".into()));
     }
     for attempt in 0..2 {
-        match capture_once(root, node, budget, hook) {
+        match capture_once(root, node, budget, hook, allow_offline) {
             Err(Error::Unavailable) if attempt == 0 => continue,
             result => return result,
         }
@@ -313,12 +376,22 @@ fn capture_once(
     node: &str,
     budget: &mut Budget,
     hook: &mut impl FnMut(&str),
+    allow_offline: bool,
 ) -> Result<Snapshot, Error> {
     let state_path = root.join("state.json");
-    let before = metadata(&state_path, budget)?.ok_or(Error::Unavailable)?;
-    validate_json_keys(&before)?;
-    let state: State =
-        serde_json::from_slice(&before).map_err(|e| Error::Corrupt(e.to_string()))?;
+    let before = metadata(&state_path, budget)?;
+    let offline = before.is_none() && allow_offline;
+    let state: State = match &before {
+        Some(bytes) => {
+            validate_json_keys(bytes)?;
+            serde_json::from_slice(bytes).map_err(|e| Error::Corrupt(e.to_string()))?
+        }
+        None if offline => State {
+            v: 1,
+            ..State::default()
+        },
+        None => return Err(Error::Unavailable),
+    };
     if state.v != 1 {
         return Err(Error::Corrupt("unsupported state version".into()));
     }
@@ -374,7 +447,7 @@ fn capture_once(
             })
             .transpose()?;
         let committed = state.files.get(&format!("{node}/{day}")).copied();
-        if manifest.is_none() && committed.is_none() {
+        if manifest.is_none() && committed.is_none() && !offline {
             continue;
         }
         budget.charge(Charge::File, 1)?;
@@ -382,7 +455,7 @@ fn capture_once(
         let source = match File::open(dir.join(format!("{day}.ndjson.zst"))) {
             Ok(file) => {
                 let actual = file.metadata()?.len();
-                let length = if manifest.is_some() {
+                let length = if manifest.is_some() || offline {
                     actual
                 } else {
                     committed.unwrap()
@@ -410,13 +483,14 @@ fn capture_once(
             source,
         });
     }
-    if metadata(&state_path, budget)?.as_deref() != Some(before.as_slice()) {
+    if metadata(&state_path, budget)? != before {
         return Err(Error::Unavailable);
     }
     budget.check()?;
     Ok(Snapshot {
         node: node.into(),
         days: pinned,
+        _offline_lock: None,
     })
 }
 

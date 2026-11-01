@@ -498,8 +498,18 @@ mod tests {
         let yesterday = time::day_of_ns(time::now_ns() - time::DAY_SECS * time::NS);
         let old_key = format!("node-a/{yesterday}");
         fs::rename(s.data_path(&key), s.data_path(&old_key)).unwrap();
-        let len = s.state.files.remove(&key).unwrap();
-        s.state.files.insert(old_key.clone(), len);
+        // Moving the receive day in this fixture must also move its stored receive timestamps.
+        let bytes = zstd::decode_all(File::open(s.data_path(&old_key)).unwrap()).unwrap();
+        let mut records = Vec::new();
+        for line in bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+            let mut v: Value = serde_json::from_slice(line).unwrap();
+            v["recv_ts"] = format!("{yesterday}T12:00:00.000000000Z").into();
+            records.extend_from_slice(format!("{v}\n").as_bytes());
+        }
+        let bytes = zstd::encode_all(records.as_slice(), 3).unwrap();
+        fs::write(s.data_path(&old_key), &bytes).unwrap();
+        s.state.files.remove(&key);
+        s.state.files.insert(old_key.clone(), bytes.len() as u64);
         s.write_state().unwrap();
         let before = lines(&s, "node-a");
         (root, Arc::new(Mutex::new(s)), old_key, before)

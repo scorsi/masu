@@ -35,6 +35,7 @@ fn query_json_features_preserve_ingestion_and_read_numeric_contract() {
     );
     let dir = root.0.join("archive/node-a");
     fs::create_dir_all(&dir).unwrap();
+    fs::write(root.0.join("FORMAT"), masu_core::store::FORMAT).unwrap();
     let data = dir.join("2026-11-01.ndjson.zst");
     let query = read::Query {
         node: "node-a".into(),
@@ -48,6 +49,8 @@ fn query_json_features_preserve_ingestion_and_read_numeric_contract() {
         "{}\n",
         base.replace("\"seq\":1", &format!("\"seq\":{}", u64::MAX))
     );
+    let exact = exact.trim_end().strip_suffix('}').unwrap().to_string()
+        + ",\"recv_ts\":\"2026-11-01T00:00:01.000000000Z\"}\n";
     fs::write(&data, zstd::encode_all(exact.as_bytes(), 3).unwrap()).unwrap();
     let mut out = Vec::new();
     read::read(&root.0, &query, &mut out).unwrap();

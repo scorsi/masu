@@ -1,15 +1,20 @@
-//! `masu read` and `masu verify` (ADR 0008): read the archive files directly, no server.
+//! Direct `masu-store read/verify` (ADRs 0008/0015), without recovery or archive mutation.
 
 use crate::exposition::{self, Format};
-use crate::seal::{Manifest, Scan, differences, next_line, open_day};
-use crate::store::{node_dirs, read_dir_sorted};
+use crate::query::{
+    budget::{Budget, Limits},
+    snapshot::Snapshot,
+};
+#[cfg(test)]
+use crate::seal::Scan;
+use crate::store::node_dirs;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-/// `masu read` refuses a query past this many output rows (they are sorted in memory).
+/// Direct `read` refuses a query past this many output rows (they are sorted in memory).
 const MAX_ROWS: usize = 1_000_000;
 
 pub struct Query {
@@ -29,86 +34,46 @@ pub fn read(root: &Path, q: &Query, out: &mut impl Write) -> io::Result<()> {
     read_rows(root, q, out, MAX_ROWS)
 }
 
+fn direct_budget() -> Budget {
+    Budget::new(Limits {
+        metadata_bytes: u64::MAX,
+        files: u64::MAX,
+        directory_entries_per_node: u64::MAX,
+        compressed_bytes: u64::MAX,
+        decompressed_bytes: u64::MAX,
+        records: u64::MAX,
+        wall_time: std::time::Duration::MAX,
+        ..Limits::default()
+    })
+}
 fn read_rows(root: &Path, q: &Query, out: &mut impl Write, max_rows: usize) -> io::Result<()> {
-    let dir = root.join("archive").join(&q.node);
-    let mut rows: Vec<(String, String)> = Vec::new();
-    for file in read_dir_sorted(&dir)? {
-        let Some(day) = data_day(&file) else {
+    let mut budget = direct_budget();
+    let mut snapshot =
+        Snapshot::capture_for_read(root, &q.node, &mut budget).map_err(io::Error::other)?;
+    let mut rows = Vec::new();
+    for day in &mut snapshot.days {
+        if day.is_missing() {
             continue;
-        };
-        // A manifest's ts range prunes the day; an open day is always read.
-        if let Some(m) = manifest(&dir.join(format!("{day}.manifest.json")))
-            .map_err(|e| io::Error::other(format!("{}/{day}: {e}", q.node)))?
-            && (m
-                .min_ts
+        }
+        if day.manifest.as_ref().is_some_and(|m| {
+            m.min_ts
                 .as_deref()
                 .zip(q.to.as_deref())
                 .is_some_and(|(min, to)| min > to)
                 || m.max_ts
                     .as_deref()
                     .zip(q.from.as_deref())
-                    .is_some_and(|(max, from)| max < from))
-        {
+                    .is_some_and(|(max, from)| max < from)
+        }) {
             continue;
         }
-        let mut lines = open_day(&file)?;
-        let mut line = Vec::new();
-        let mut n = 0;
-        let damaged = |n: u64, e: &dyn std::fmt::Display| {
-            io::Error::other(format!("{}/{day}: record {n}: {e}", q.node))
-        };
-        while next_line(&mut lines, &mut line).map_err(|e| damaged(n + 1, &e))? {
+        let mut n = 0u64;
+        day.scan_lines(&mut budget, |value, line, _| {
             n += 1;
-            let v: Value = serde_json::from_slice(&line).map_err(|e| damaged(n, &e))?;
-            let (Some(ts), Some(service), Some(up)) =
-                (v["ts"].as_str(), v["service"].as_str(), v["up"].as_bool())
-            else {
-                return Err(damaged(n, &"envelope without ts, service or up"));
-            };
-            if q.from.as_deref().is_some_and(|f| ts < f) || q.to.as_deref().is_some_and(|t| ts > t)
-            {
-                continue;
-            }
-            if q.service.as_deref().is_some_and(|s| s != service) {
-                continue;
-            }
-            // The budget is checked before every row, each sample of a record included.
-            let mut emit = |row: String| {
-                if rows.len() >= max_rows {
-                    return Err(io::Error::other(format!(
-                        "more than {max_rows} rows: narrow the query (--from, --to, --service, --metric)"
-                    )));
-                }
-                rows.push((ts.to_string(), row));
-                Ok(())
-            };
-            if q.raw {
-                emit(String::from_utf8_lossy(&line).trim_end().into())?;
-                continue;
-            }
-            let head = format!("{ts} {} {service}", q.node);
-            if !up {
-                emit(format!(
-                    "{head} !{}",
-                    v["error"].as_str().unwrap_or("error")
-                ))?;
-                continue;
-            }
-            let format = Format::from_content_type(v["content_type"].as_str().unwrap_or(""));
-            match exposition::parse(v["body"].as_str().unwrap_or(""), format) {
-                Err(e) => emit(format!("{head} !parse-error:{e}"))?,
-                Ok(families) => {
-                    for s in families.iter().flat_map(|f| &f.samples) {
-                        if q.metric.as_deref().is_some_and(|m| !s.name.starts_with(m)) {
-                            continue;
-                        }
-                        // shortcut: a sample's own timestamp is ignored, the record's ts is printed;
-                        // revisit when the engine re-ingests the archive.
-                        emit(format!("{head} {} {}", series(&s.name, &s.labels), s.value))?;
-                    }
-                }
-            }
-        }
+            collect_rows(q, value, line, &mut rows, max_rows)
+                .map_err(|e| crate::query::snapshot::Error::Corrupt(format!("record {n}: {e}")))
+        })
+        .map_err(|e| io::Error::other(format!("{}/{}: {e}", q.node, day.day)))?;
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     for (_, row) in rows {
@@ -116,19 +81,64 @@ fn read_rows(root: &Path, q: &Query, out: &mut impl Write, max_rows: usize) -> i
     }
     Ok(())
 }
-
-/// A day's manifest; `None` when the day is not sealed. Any other read error is an error.
-fn manifest(path: &Path) -> io::Result<Option<Manifest>> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| io::Error::other(format!("manifest: {e}"))),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(io::Error::other(format!("manifest: {e}"))),
+fn collect_rows(
+    q: &Query,
+    v: &Value,
+    line: &[u8],
+    rows: &mut Vec<(String, String)>,
+    max_rows: usize,
+) -> io::Result<()> {
+    let (Some(ts), Some(service), Some(up)) =
+        (v["ts"].as_str(), v["service"].as_str(), v["up"].as_bool())
+    else {
+        return Err(io::Error::other("envelope without ts, service or up"));
+    };
+    if q.from.as_deref().is_some_and(|f| ts < f) || q.to.as_deref().is_some_and(|t| ts > t) {
+        return Ok(());
     }
+    if q.service.as_deref().is_some_and(|s| s != service) {
+        return Ok(());
+    }
+    // The budget is checked before every row, each sample of a record included.
+    let mut emit = |row: String| {
+        if rows.len() >= max_rows {
+            return Err(io::Error::other(format!(
+                "more than {max_rows} rows: narrow the query (--from, --to, --service, --metric)"
+            )));
+        }
+        rows.push((ts.to_string(), row));
+        Ok(())
+    };
+    if q.raw {
+        emit(String::from_utf8_lossy(line).trim_end().into())?;
+        return Ok(());
+    }
+    let head = format!("{ts} {} {service}", q.node);
+    if !up {
+        emit(format!(
+            "{head} !{}",
+            v["error"].as_str().unwrap_or("error")
+        ))?;
+        return Ok(());
+    }
+    let format = Format::from_content_type(v["content_type"].as_str().unwrap_or(""));
+    match exposition::parse(v["body"].as_str().unwrap_or(""), format) {
+        Err(e) => emit(format!("{head} !parse-error:{e}"))?,
+        Ok(families) => {
+            for s in families.iter().flat_map(|f| &f.samples) {
+                if q.metric.as_deref().is_some_and(|m| !s.name.starts_with(m)) {
+                    continue;
+                }
+                // shortcut: a sample's own timestamp is ignored, the record's ts is printed;
+                // revisit when the engine re-ingests the archive.
+                emit(format!("{head} {} {}", series(&s.name, &s.labels), s.value))?;
+            }
+        }
+    }
+    Ok(())
 }
 
-fn series(name: &str, labels: &[(String, String)]) -> String {
+pub fn series(name: &str, labels: &[(String, String)]) -> String {
     if labels.is_empty() {
         return name.into();
     }
@@ -152,59 +162,50 @@ fn series(name: &str, labels: &[(String, String)]) -> String {
 pub fn verify(root: &Path, out: &mut impl Write) -> io::Result<Vec<String>> {
     let mut errors = Vec::new();
     if fs::read_to_string(root.join("FORMAT")).ok().as_deref() != Some(crate::store::FORMAT) {
-        errors.push("FORMAT: missing or not `masu-archive 1`".to_string());
+        let error = "FORMAT: missing or not `masu-archive 1`".to_string();
+        writeln!(out, "{error}")?;
+        return Ok(vec![error]);
     }
     let mut seen = Seen::default();
+    let mut budget = direct_budget();
+    let _root_guard =
+        crate::query::snapshot::ReadGuard::acquire(root, &mut budget).map_err(io::Error::other)?;
     for node in node_dirs(root)? {
         let node_name = node.file_name().unwrap().to_string_lossy().into_owned();
-        for file in read_dir_sorted(&node)? {
-            let Some(day) = data_day(&file) else {
+        let mut snapshot = match Snapshot::capture_for_read(root, &node_name, &mut budget) {
+            Ok(s) => s,
+            Err(e) => {
+                errors.push(format!("{node_name}: {e}"));
                 continue;
-            };
-            let name = format!("{node_name}/{day}");
-            let manifest_path = node.join(format!("{day}.manifest.json"));
-            match verify_file(&file, &node_name, day, &manifest_path, &mut seen) {
-                Ok(records) => writeln!(out, "{name}: ok ({records} records)")?,
+            }
+        };
+        for day in &mut snapshot.days {
+            if day.is_missing() {
+                continue;
+            }
+            let name = format!("{node_name}/{}", day.day);
+            let mut records = 0u64;
+            let result = day.scan(&mut budget, |v, _| {
+                records += 1;
+                let stream = v["stream"].as_str().unwrap();
+                let seq = v["seq"].as_u64().unwrap();
+                if !seen.insert(stream, seq) {
+                    return Err(crate::query::snapshot::Error::Corrupt(format!(
+                        "record {records}: duplicate (stream {stream}, seq {seq})"
+                    )));
+                }
+                Ok(())
+            });
+            match result {
+                Ok(()) => writeln!(out, "{name}: ok ({records} records)")?,
                 Err(e) => errors.push(format!("{name}: {e}")),
             }
         }
     }
-    for e in &errors {
-        writeln!(out, "{e}")?;
+    for error in &errors {
+        writeln!(out, "{error}")?;
     }
     Ok(errors)
-}
-
-fn verify_file(
-    file: &Path,
-    node: &str,
-    day: &str,
-    manifest_path: &Path,
-    seen: &mut Seen,
-) -> Result<u64, String> {
-    let manifest = manifest(manifest_path).map_err(|e| e.to_string())?;
-    let mut scan = Scan::default();
-    let mut lines = open_day(file).map_err(|e| e.to_string())?;
-    let mut line = Vec::new();
-    let mut records = 0u64;
-    while next_line(&mut lines, &mut line).map_err(|e| format!("record {}: {e}", records + 1))? {
-        records += 1;
-        let v = scan.line(&line).map_err(|e| e.to_string())?;
-        if let (Some(stream), Some(seq)) = (v["stream"].as_str(), v["seq"].as_u64())
-            && !seen.insert(stream, seq)
-        {
-            return Err(format!(
-                "record {records}: duplicate (stream {stream}, seq {seq})"
-            ));
-        }
-    }
-    if let Some(m) = manifest {
-        let diff = differences(&scan.manifest(node, day, m.sealed_at.clone()), &m);
-        if !diff.is_empty() {
-            return Err(diff);
-        }
-    }
-    Ok(records)
 }
 
 /// Every `(stream, seq)` seen, as disjoint inclusive ranges per stream: a stream's consecutive
@@ -234,10 +235,6 @@ impl Seen {
         ranges.insert(start, end);
         true
     }
-}
-
-fn data_day(file: &Path) -> Option<&str> {
-    file.file_name()?.to_str()?.strip_suffix(".ndjson.zst")
 }
 
 #[cfg(test)]
@@ -293,29 +290,40 @@ mod tests {
         // A duplicated (stream, seq) is an error.
         let key = s.state.files.keys().next().unwrap().clone();
         let path = s.data_path(&key);
-        let dup = fs::read(&path).unwrap();
+        let decoded = zstd::decode_all(fs::File::open(&path).unwrap()).unwrap();
+        let mut duplicate = Vec::new();
+        for line in decoded.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+            let mut value: Value = serde_json::from_slice(line).unwrap();
+            value["recv_ts"] = "2020-01-01T00:00:00.000000000Z".into();
+            duplicate.extend_from_slice(format!("{value}\n").as_bytes());
+        }
+        let dup = zstd::encode_all(duplicate.as_slice(), 3).unwrap();
         fs::write(s.data_path("node-a/2020-01-01"), &dup).unwrap();
+        s.state
+            .files
+            .insert("node-a/2020-01-01".into(), dup.len() as u64);
+        s.write_state().unwrap();
         let errors = verify(&root, &mut Vec::new()).unwrap();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("duplicate"), "{errors:?}");
         fs::remove_file(s.data_path("node-a/2020-01-01")).unwrap();
+        s.state.files.remove("node-a/2020-01-01");
+        s.write_state().unwrap();
         // A manifest whose hash does not match is an error.
+        let decoded = zstd::decode_all(fs::File::open(s.data_path(&key)).unwrap()).unwrap();
+        let mut scan = Scan::default();
+        for line in decoded.split_inclusive(|&b| b == b'\n') {
+            scan.line(line).unwrap();
+        }
+        let mut manifest = scan.manifest(
+            "node-a",
+            key.split_once('/').unwrap().1,
+            "2026-11-02T00:10:00.000000000Z".into(),
+        );
+        manifest.content_sha256 = "0".repeat(64);
         fs::write(
             s.manifest_path(&key),
-            serde_json::to_vec(&Manifest {
-                v: 1,
-                node: "node-a".into(),
-                day: "x".into(),
-                records: 5,
-                uncompressed_bytes: 0,
-                content_sha256: "00".into(),
-                min_ts: None,
-                max_ts: None,
-                services: Default::default(),
-                streams: vec![],
-                sealed_at: String::new(),
-            })
-            .unwrap(),
+            serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
         let errors = verify(&root, &mut Vec::new()).unwrap();
@@ -343,7 +351,11 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(root.join("FORMAT"), crate::store::FORMAT).unwrap();
         let rec = |seq: u64| {
-            String::from_utf8(crate::store::tests::record("node-a", &STREAM, seq).to_vec()).unwrap()
+            let mut v: Value =
+                serde_json::from_slice(&crate::store::tests::record("node-a", &STREAM, seq))
+                    .unwrap();
+            v["recv_ts"] = "2026-10-19T10:00:00.000000000Z".into();
+            v.to_string()
         };
         let content = format!("{}\n{}\n", rec(1), rec(2));
         let data = dir.join("2026-10-19.ndjson.zst");
@@ -398,10 +410,15 @@ mod tests {
     #[test]
     fn read_refuses_damaged_records() {
         let root = tempdir("read-damaged");
+        fs::write(root.join("FORMAT"), crate::store::FORMAT).unwrap();
         let dir = root.join("archive/node-a");
         fs::create_dir_all(&dir).unwrap();
         let rec = |seq: u64| {
-            String::from_utf8(crate::store::tests::record("node-a", &STREAM, seq).to_vec()).unwrap()
+            let mut v: Value =
+                serde_json::from_slice(&crate::store::tests::record("node-a", &STREAM, seq))
+                    .unwrap();
+            v["recv_ts"] = "2026-10-19T10:00:00.000000000Z".into();
+            v.to_string()
         };
         let data = dir.join("2026-10-19.ndjson.zst");
         for broken in ["{not json", r#"{"v":1,"stream":"x"}"#] {
@@ -443,6 +460,77 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn direct_read_and_verify_ignore_uncommitted_live_tails_without_mutation() {
+        let root = tempdir("direct-live");
+        let mut store = open(&root);
+        assert_eq!(
+            store.push("node-a", &request("node-a", &STREAM, 1, 2)),
+            Reply::Ok { acked_seq: 2 }
+        );
+        let key = store.state.files.keys().next().unwrap().clone();
+        let data = store.data_path(&key);
+        let state = fs::read(root.join("state.json")).unwrap();
+        let committed = fs::read(&data).unwrap();
+        let mut tailed = committed.clone();
+        tailed.extend(&committed);
+        tailed.extend([0x28, 0xb5]);
+        fs::write(&data, &tailed).unwrap();
+        let mut out = Vec::new();
+        read(&root, &query("node-a"), &mut out).unwrap();
+        assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 2);
+        assert!(verify(&root, &mut Vec::new()).unwrap().is_empty());
+        assert_eq!(fs::read(&data).unwrap(), tailed);
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), state);
+        fs::remove_file(root.join("state.json")).unwrap();
+        assert!(
+            read(&root, &query("node-a"), &mut Vec::new()).is_err(),
+            "an active writer without state must never become an offline reader"
+        );
+        drop(store);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn direct_restored_read_holds_a_shared_lock_and_never_rebuilds_state() {
+        let root = tempdir("direct-offline");
+        let mut store = open(&root);
+        store.push("node-a", &request("node-a", &STREAM, 1, 2));
+        let key = store.state.files.keys().next().unwrap().clone();
+        let data = store.data_path(&key);
+        let before = fs::read(&data).unwrap();
+        drop(store);
+        fs::remove_file(root.join("state.json")).unwrap();
+        let snapshot = Snapshot::capture_for_read(&root, "node-a", &mut direct_budget()).unwrap();
+        let probe = fs::File::open(root.join("FORMAT")).unwrap();
+        assert!(probe.try_lock().is_err());
+        drop(snapshot);
+        probe.try_lock().unwrap();
+        drop(probe);
+        let mut out = Vec::new();
+        read(&root, &query("node-a"), &mut out).unwrap();
+        assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 2);
+        assert!(verify(&root, &mut Vec::new()).unwrap().is_empty());
+        assert!(!root.join("state.json").exists());
+        assert_eq!(fs::read(data).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn direct_verify_empty_offline_root_still_excludes_a_writer() {
+        let root = tempdir("verify-empty-lock");
+        fs::write(root.join("FORMAT"), crate::store::FORMAT).unwrap();
+        let writer = fs::File::open(root.join("FORMAT")).unwrap();
+        writer.try_lock().unwrap();
+        let mut out = Vec::new();
+        assert!(verify(&root, &mut out).is_err());
+        assert!(out.is_empty());
+        drop(writer);
+        assert!(verify(&root, &mut out).unwrap().is_empty());
+        let probe = fs::File::open(root.join("FORMAT")).unwrap();
+        probe.try_lock().unwrap();
+        assert!(!root.join("state.json").exists());
+        drop(probe);
+        let _ = fs::remove_dir_all(root);
+    }
     /// F16: seqs kept as ranges; duplicates found across and inside ranges.
     #[test]
     fn seen_ranges() {

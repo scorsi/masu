@@ -4,10 +4,12 @@
 mod config;
 mod server;
 
-use std::process::ExitCode;
+use std::{io::Write, path::Path, process::ExitCode};
 
 const USAGE: &str = "usage: masu-store serve <config.toml>
        masu-store check-config <config.toml>
+       masu-store read --root <root> --node <name> [--service <s>] [--metric <prefix>] [--from <ts>] [--to <ts>] [--raw]
+       masu-store verify --root <root>
        masu-store --version";
 
 fn main() -> ExitCode {
@@ -27,6 +29,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["read", ref rest @ ..] => read(rest),
+        ["verify", "--root", root] => {
+            match masu_core::read::verify(Path::new(root), &mut std::io::stdout()) {
+                Ok(errors) if errors.is_empty() => ExitCode::SUCCESS,
+                Ok(_) => ExitCode::FAILURE,
+                Err(e) => {
+                    eprintln!("masu-store: {root}: {e}");
+                    ExitCode::from(2)
+                }
+            }
+        }
         ["--version"] => {
             println!("masu-store {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -41,4 +54,61 @@ fn main() -> ExitCode {
 fn load_config(path: &str) -> Result<config::Config, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     config::Config::parse(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+fn read(args: &[&str]) -> ExitCode {
+    let result = (|| {
+        let mut q = masu_core::read::Query {
+            node: String::new(),
+            service: None,
+            metric: None,
+            from: None,
+            to: None,
+            raw: false,
+        };
+        let mut root = None;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut it = args.iter();
+        while let Some(&flag) = it.next() {
+            if !seen.insert(flag) {
+                return Err("duplicate read option".to_string());
+            }
+            if flag == "--raw" {
+                q.raw = true;
+                continue;
+            }
+            let value = it.next().ok_or("missing read option value")?.to_string();
+            match flag {
+                "--root" => root = Some(value),
+                "--node" => q.node = value,
+                "--service" => q.service = Some(value),
+                "--metric" => q.metric = Some(value),
+                "--from" => q.from = Some(value),
+                "--to" => q.to = Some(value),
+                _ => return Err("unknown read option".into()),
+            }
+        }
+        if !masu_core::record::is_node(&q.node)
+            || q.from
+                .as_deref()
+                .is_some_and(|t| !masu_core::record::is_timestamp(t))
+            || q.to
+                .as_deref()
+                .is_some_and(|t| !masu_core::record::is_timestamp(t))
+        {
+            return Err("invalid read node or timestamp".into());
+        }
+        let root = root.ok_or("--root is required")?;
+        let mut out = std::io::BufWriter::new(std::io::stdout());
+        masu_core::read::read(Path::new(&root), &q, &mut out)
+            .and_then(|()| out.flush())
+            .map_err(|e| format!("{root}: {e}"))
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("masu-store: {e}\n{USAGE}");
+            ExitCode::from(2)
+        }
+    }
 }
