@@ -5,10 +5,21 @@ rec {
   certs = pkgs.runCommand "masu-test-certs" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir $out && cd $out
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj /CN=masu-test-ca \
-      -keyout ca.key -out ca.pem
+      -keyout ca.key -out ca.pem \
+      -addext 'basicConstraints=critical,CA:TRUE' \
+      -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+      -addext 'subjectKeyIdentifier=hash' \
+      -addext 'authorityKeyIdentifier=keyid:always'
     openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout leaf.key -out leaf.csr
     openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 3650 \
-      -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1') -out leaf.pem
+      -extfile <(printf '%s\n' \
+        'basicConstraints=critical,CA:FALSE' \
+        'keyUsage=critical,digitalSignature,keyEncipherment' \
+        'extendedKeyUsage=serverAuth' \
+        'subjectKeyIdentifier=hash' \
+        'authorityKeyIdentifier=keyid,issuer' \
+        'subjectAltName=DNS:localhost,IP:127.0.0.1') -out leaf.pem
+    openssl verify -x509_strict -purpose sslserver -CAfile ca.pem leaf.pem
   '';
 
   tokens = {
