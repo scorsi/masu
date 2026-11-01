@@ -118,7 +118,7 @@ impl Day {
                 return Err(Error::Corrupt("record node differs from directory".into()));
             }
             let value = scan.line(&line).map_err(read_error)?;
-            if &value["recv_ts"].as_str().unwrap()[..10] != self.day {
+            if value["recv_ts"].as_str().unwrap()[..10] != self.day {
                 return Err(Error::Corrupt(
                     "record receive day differs from directory".into(),
                 ));
