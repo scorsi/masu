@@ -668,61 +668,6 @@ pub(super) fn response(bytes: &[u8]) -> Result<pb::QueryResponse> {
     })?;
     Ok(pb::QueryResponse { results, budget })
 }
-fn double_value(v: f64) -> Value {
-    if v.is_nan() {
-        "NaN".into()
-    } else if v == f64::INFINITY {
-        "Infinity".into()
-    } else if v == f64::NEG_INFINITY {
-        "-Infinity".into()
-    } else {
-        Value::from(v)
-    }
-}
-fn series_value(s: &pb::Series) -> Value {
-    let mut v = json!({"labels":s.labels,"ts":s.ts.iter().map(ToString::to_string).collect::<Vec<_>>(),"values":s.values.iter().copied().map(double_value).collect::<Vec<_>>()});
-    if let Some(start) = &s.start {
-        v["start"] = start.to_string().into();
-    }
-    if let Some(step) = &s.step {
-        v["step"] = step.to_string().into();
-    }
-    v
-}
-fn result_value(r: &pb::QueryResult) -> Value {
-    let mut v = json!({});
-    match r.body.as_ref().unwrap() {
-        pb::query_result::Body::Series(f) => {
-            v["series"] = json!({"series":f.series.iter().map(series_value).collect::<Vec<_>>()})
-        }
-        pb::query_result::Body::Table(f) => {
-            v["table"] = json!({"rows":f.rows.iter().map(struct_value).collect::<Vec<_>>()})
-        }
-        pb::query_result::Body::Counts(f) => {
-            v["counts"] = json!({"start":f.start.as_ref().unwrap().to_string(),"step":f.step.as_ref().unwrap().to_string(),"groups":f.groups.iter().map(|g|json!({"by":g.by,"counts":g.counts.iter().map(ToString::to_string).collect::<Vec<_>>()})).collect::<Vec<_>>()})
-        }
-        pb::query_result::Body::Error(e) => {
-            v["error"] = json!({"reason":e.reason,"message":e.message})
-        }
-    }
-    if !r.cursor.is_empty() {
-        v["cursor"] = r.cursor.clone().into();
-    }
-    v
-}
-pub(super) fn response_value(r: &pb::QueryResponse) -> Value {
-    let results: Map<String, Value> = r
-        .results
-        .iter()
-        .map(|(k, v)| (k.clone(), result_value(v)))
-        .collect();
-    let mut v = json!({"results":results});
-    if let Some(b) = &r.budget {
-        v["budget"] = json!({"recordsRead":b.records_read.to_string(),"bytesRead":b.bytes_read.to_string(),"elapsedMs":b.elapsed_ms.to_string()});
-    }
-    v
-}
-
 fn struct_from_json(v: &Value) -> Result<prost_types::Struct> {
     if !v.is_object() {
         return Err(Error::InvalidRequest);
@@ -747,25 +692,6 @@ fn value_from_json(v: &Value) -> Result<prost_types::Value> {
         }),
     };
     Ok(prost_types::Value { kind: Some(kind) })
-}
-fn struct_value(s: &prost_types::Struct) -> Value {
-    Value::Object(
-        s.fields
-            .iter()
-            .map(|(k, v)| (k.clone(), value_value(v)))
-            .collect(),
-    )
-}
-fn value_value(v: &prost_types::Value) -> Value {
-    use prost_types::value::Kind;
-    match v.kind.as_ref().unwrap() {
-        Kind::NullValue(_) => Value::Null,
-        Kind::BoolValue(v) => (*v).into(),
-        Kind::NumberValue(v) => Value::from(*v),
-        Kind::StringValue(v) => v.clone().into(),
-        Kind::StructValue(v) => struct_value(v),
-        Kind::ListValue(v) => Value::Array(v.values.iter().map(value_value).collect()),
-    }
 }
 pub(super) fn validate_struct(s: &prost_types::Struct, depth: usize) -> Result<()> {
     if depth > 64 {
@@ -818,4 +744,295 @@ pub(super) fn encode(value: &Value, limit: usize, error: Error) -> Result<Vec<u8
     };
     serde_json::to_writer(&mut out, value).map_err(|_| error)?;
     Ok(out.bytes)
+}
+
+// These adapters borrow message contents, so measuring/encoding a batch does not clone it.
+struct SeriesJson<'a>(&'a pb::Series);
+struct ResultJson<'a>(&'a pb::QueryResult);
+struct ResponseJson<'a>(&'a pb::QueryResponse);
+struct StructJson<'a>(&'a prost_types::Struct);
+struct ValueJson<'a>(&'a prost_types::Value);
+struct DoubleJson(f64);
+struct TimestampList<'a>(&'a [prost_types::Timestamp]);
+struct DoubleList<'a>(&'a [f64]);
+struct UIntList<'a>(&'a [u64]);
+
+impl serde::Serialize for DoubleJson {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        if self.0.is_nan() {
+            s.serialize_str("NaN")
+        } else if self.0 == f64::INFINITY {
+            s.serialize_str("Infinity")
+        } else if self.0 == f64::NEG_INFINITY {
+            s.serialize_str("-Infinity")
+        } else {
+            s.serialize_f64(self.0)
+        }
+    }
+}
+impl serde::Serialize for TimestampList<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut out = s.serialize_seq(Some(self.0.len()))?;
+        for t in self.0 {
+            out.serialize_element(&t.to_string())?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for DoubleList<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut out = s.serialize_seq(Some(self.0.len()))?;
+        for n in self.0 {
+            out.serialize_element(&DoubleJson(*n))?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for UIntList<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut out = s.serialize_seq(Some(self.0.len()))?;
+        for n in self.0 {
+            out.serialize_element(&n.to_string())?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for SeriesJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(None)?;
+        out.serialize_entry("labels", &self.0.labels)?;
+        if let Some(t) = &self.0.start {
+            out.serialize_entry("start", &t.to_string())?;
+        }
+        if let Some(t) = &self.0.step {
+            out.serialize_entry("step", &t.to_string())?;
+        }
+        out.serialize_entry("ts", &TimestampList(&self.0.ts))?;
+        out.serialize_entry("values", &DoubleList(&self.0.values))?;
+        out.end()
+    }
+}
+impl serde::Serialize for StructJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(self.0.fields.len()))?;
+        for (k, v) in &self.0.fields {
+            out.serialize_entry(k, &ValueJson(v))?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for ValueJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use prost_types::value::Kind;
+        use serde::ser::SerializeSeq;
+        match self
+            .0
+            .kind
+            .as_ref()
+            .ok_or_else(|| serde::ser::Error::custom("missing Value kind"))?
+        {
+            Kind::NullValue(_) => s.serialize_unit(),
+            Kind::BoolValue(v) => s.serialize_bool(*v),
+            Kind::NumberValue(v) => s.serialize_f64(*v),
+            Kind::StringValue(v) => s.serialize_str(v),
+            Kind::StructValue(v) => serde::Serialize::serialize(&StructJson(v), s),
+            Kind::ListValue(v) => {
+                let mut out = s.serialize_seq(Some(v.values.len()))?;
+                for v in &v.values {
+                    out.serialize_element(&ValueJson(v))?;
+                }
+                out.end()
+            }
+        }
+    }
+}
+struct SeriesList<'a>(&'a [pb::Series]);
+struct RowList<'a>(&'a [prost_types::Struct]);
+struct GroupList<'a>(&'a [pb::CountGroup]);
+impl serde::Serialize for SeriesList<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut out = s.serialize_seq(Some(self.0.len()))?;
+        for v in self.0 {
+            out.serialize_element(&SeriesJson(v))?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for RowList<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut out = s.serialize_seq(Some(self.0.len()))?;
+        for v in self.0 {
+            out.serialize_element(&StructJson(v))?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for GroupList<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut out = s.serialize_seq(Some(self.0.len()))?;
+        for v in self.0 {
+            out.serialize_element(&CountGroupJson(v))?;
+        }
+        out.end()
+    }
+}
+struct SeriesFrameJson<'a>(&'a pb::SeriesFrame);
+struct TableJson<'a>(&'a pb::TableFrame);
+struct CountsJson<'a>(&'a pb::CountsFrame);
+struct CountGroupJson<'a>(&'a pb::CountGroup);
+struct ErrorJson<'a>(&'a pb::QueryError);
+struct BudgetJson<'a>(&'a pb::Budget);
+struct ResultsJson<'a>(&'a BTreeMap<String, pb::QueryResult>);
+impl serde::Serialize for SeriesFrameJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(1))?;
+        out.serialize_entry("series", &SeriesList(&self.0.series))?;
+        out.end()
+    }
+}
+impl serde::Serialize for TableJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(1))?;
+        out.serialize_entry("rows", &RowList(&self.0.rows))?;
+        out.end()
+    }
+}
+impl serde::Serialize for CountsJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(3))?;
+        out.serialize_entry("start", &self.0.start.as_ref().unwrap().to_string())?;
+        out.serialize_entry("step", &self.0.step.as_ref().unwrap().to_string())?;
+        out.serialize_entry("groups", &GroupList(&self.0.groups))?;
+        out.end()
+    }
+}
+impl serde::Serialize for CountGroupJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(2))?;
+        out.serialize_entry("by", &self.0.by)?;
+        out.serialize_entry("counts", &UIntList(&self.0.counts))?;
+        out.end()
+    }
+}
+impl serde::Serialize for ErrorJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(2))?;
+        out.serialize_entry("reason", &self.0.reason)?;
+        out.serialize_entry("message", &self.0.message)?;
+        out.end()
+    }
+}
+impl serde::Serialize for BudgetJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(3))?;
+        out.serialize_entry("recordsRead", &self.0.records_read.to_string())?;
+        out.serialize_entry("bytesRead", &self.0.bytes_read.to_string())?;
+        out.serialize_entry("elapsedMs", &self.0.elapsed_ms.to_string())?;
+        out.end()
+    }
+}
+impl serde::Serialize for ResultsJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(Some(self.0.len()))?;
+        for (k, v) in self.0 {
+            out.serialize_entry(k, &ResultJson(v))?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for ResultJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(None)?;
+        match self.0.body.as_ref().unwrap() {
+            pb::query_result::Body::Series(v) => {
+                out.serialize_entry("series", &SeriesFrameJson(v))?
+            }
+            pb::query_result::Body::Table(v) => out.serialize_entry("table", &TableJson(v))?,
+            pb::query_result::Body::Counts(v) => out.serialize_entry("counts", &CountsJson(v))?,
+            pb::query_result::Body::Error(v) => out.serialize_entry("error", &ErrorJson(v))?,
+        }
+        if !self.0.cursor.is_empty() {
+            out.serialize_entry("cursor", &self.0.cursor)?;
+        }
+        out.end()
+    }
+}
+impl serde::Serialize for ResponseJson<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut out = s.serialize_map(None)?;
+        out.serialize_entry("results", &ResultsJson(&self.0.results))?;
+        if let Some(v) = &self.0.budget {
+            out.serialize_entry("budget", &BudgetJson(v))?;
+        }
+        out.end()
+    }
+}
+
+pub(super) fn measured<T: serde::Serialize>(value: &T) -> Result<u64> {
+    struct Count(u64);
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| io::Error::other("size overflow"))?;
+            if self.0 > super::MAX_RESPONSE_BYTES as u64 {
+                return Err(io::Error::other("document too large"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).map_err(|_| Error::ResponseLimit)?;
+    Ok(count.0)
+}
+pub(super) fn series_size(v: &pb::Series) -> Result<u64> {
+    measured(&SeriesJson(v))
+}
+pub(super) fn result_size(v: &pb::QueryResult) -> Result<u64> {
+    measured(&ResultJson(v))
+}
+pub(super) fn table_row_size(v: &prost_types::Struct) -> Result<u64> {
+    measured(&StructJson(v))
+}
+pub(super) fn response_size(v: &pb::QueryResponse) -> Result<u64> {
+    measured(&ResponseJson(v))
+}
+pub(super) fn encode_response(v: &pb::QueryResponse) -> Result<Vec<u8>> {
+    struct Limited(Vec<u8>);
+    impl Write for Limited {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.len() > super::MAX_RESPONSE_BYTES - self.0.len() {
+                return Err(io::Error::other("document too large"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut out = Limited(Vec::new());
+    serde_json::to_writer(&mut out, &ResponseJson(v)).map_err(|_| Error::ResponseLimit)?;
+    Ok(out.0)
 }
